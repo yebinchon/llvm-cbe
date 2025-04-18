@@ -8,6 +8,7 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CFG.h"
+#include <unordered_set>
 #if LLVM_VERSION_MAJOR > 10
 #include "llvm/IR/AbstractCallSite.h"
 #else
@@ -128,6 +129,11 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   //SUSAN: counters
   int cnt_totalVariables;
   int cnt_reconstructedVariables;
+
+  //YEBIN: Cuda kernel helpers
+  std::map<CallInst*, std::pair<int, std::pair<std::string, Value*>>> KernelCallDims;
+  std::map<std::string, Value*> DevVarDecls; 
+  std::set<Value*> LiveOuts;
 
   //SUSAN: tables not need to be saved when inlining
   std::map<Value*, std::string> inlinedArgNames;
@@ -369,6 +375,7 @@ private:
   raw_ostream &printSimpleType(raw_ostream &Out, Type *Ty, bool isSigned);
 
   std::string getStructName(StructType *ST);
+  std::string getFieldName(StructType *ST);
   std::string getFunctionName(FunctionType *FT,
                               std::pair<AttributeList, CallingConv::ID> PAL =
                                   std::make_pair(AttributeList(),
@@ -444,6 +451,10 @@ private:
   void preprocessInsts2AddParenthesis(Function &F);
   bool hasHigherOrderOps(Instruction* I, std::set<unsigned> higherOrderOpcodes);
   bool RunAllAnalysis(Function &F);
+  //YEBIN added
+  void runAnalysisOnKernelCaller(Function &F);
+  Value* getKernelDim(CallInst* I);
+
   void omp_findInlinedStructInputs(Value* argInput, std::map<int, Value*> &argInputs);
   void omp_findCorrespondingUsesOfStruct(Value* arg, std::map<int, Value*> &args);
   void inlineNameForArg(Value* argInput, Value* arg);

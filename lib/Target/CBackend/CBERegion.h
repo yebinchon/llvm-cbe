@@ -44,6 +44,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include <queue>
 
+using namespace llvm;
 
 namespace llvm_cbe {
 

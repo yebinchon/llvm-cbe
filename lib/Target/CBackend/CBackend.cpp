@@ -16,7 +16,11 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -29,7 +33,10 @@
 #include <algorithm>
 #include <cstdio>
 
+#include <cstdlib>
 #include <iostream>
+#include <string>
+#include <utility>
 
 // SUSAN: added libs
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -962,8 +969,9 @@ void CWriter::preprossesPHIs2Print(Function &F){
               skipStderr = true;
               IRNaming.insert(std::make_pair(ld, "stderr"));
             }
-          if(!skipStderr)
+          if(!skipStderr) {
             PHIValues2Print.insert(std::make_pair(predBB, phi));
+          }
         }
 
         if(PHINode *incomingPhi = dyn_cast<PHINode>(phiVal)){
@@ -1813,7 +1821,7 @@ bool CWriter::runOnModule(Module &M) {
 
     // Output all floating point constants that cannot be printed accurately.
     printFloatingPointConstants(*F);
-     printFunction(*F);
+    printFunction(*F);
 
     LI = nullptr;
     PDT = nullptr;
@@ -1912,13 +1920,21 @@ raw_ostream &CWriter::printTypeString(raw_ostream &Out, Type *Ty,
   }
 }
 
+// YEBIN: append FIXME to all structs
 std::string CWriter::getStructName(StructType *ST) {
   cwriter_assert(ST->getNumElements() != 0);
   if (!ST->isLiteral() && !ST->getName().empty())
-    return "struct l_struct_" + CBEMangle(ST->getName().str());
+    return "struct __FIXME__l_struct_" + CBEMangle(ST->getName().str());
 
   unsigned id = UnnamedStructIDs.getOrInsert(ST);
-  return "struct l_unnamed_" + utostr(id);
+  return "struct __FIXME__l_unnamed_" + utostr(id);
+}
+
+// YEBIN: get struct fields to support FIXME
+std::string CWriter::getFieldName(StructType *ST) {
+    std::string StrName = getStructName(ST);
+    StrName.erase(0, 7);
+    return StrName+"_field";
 }
 
 std::string
@@ -1935,7 +1951,7 @@ std::string CWriter::getArrayName(ArrayType *AT) {
   // value semantics (avoiding the array "decay").
   cwriter_assert(!isEmptyType(AT));
   printTypeName(ArrayInnards, AT->getElementType(), false);
-  return "struct l_array_" + utostr(AT->getNumElements()) + '_' +
+  return "struct __FIXME__l_array_" + utostr(AT->getNumElements()) + '_' +
          CBEMangle(ArrayInnards.str());
 }
 
@@ -1949,7 +1965,7 @@ std::string CWriter::getVectorName(VectorType *VT, bool Aligned) {
     Out << "__MSALIGN__(" << TD->getABITypeAlignment(VT) << ") ";
   }
   printTypeName(VectorInnards, VT->getElementType(), false);
-  return "struct l_vector_" + utostr(NumberOfElements(VT)) + '_' +
+  return "struct __FIXME__l_vector_" + utostr(NumberOfElements(VT)) + '_' +
          CBEMangle(VectorInnards.str());
 }
 
@@ -2214,7 +2230,9 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
     bool empty = isEmptyType(*I);
     if (empty)
       Out << "/* "; // skip zero-sized types
-    printTypeName(Out, *I, false) << " field" << utostr(Idx);
+    //printTypeName(Out, *I, false) << " field" << utostr(Idx);
+    // append struct name to field for FIXME
+    printTypeName(Out, *I, false) << " "+getFieldName(STy) << utostr(Idx);
     ArrayType *ArrTy = dyn_cast<ArrayType>(*I);
     while(ArrTy){
       Out << "[" << ArrTy->getNumElements() << "]";
@@ -2455,6 +2473,9 @@ CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
     headerUseNoReturn();
     Out << "__noreturn ";
   }
+
+  if(Name.find("cudakernel") != std::string::npos)
+    Out << "__global__ ";
 
   bool isStructReturn = false;
   if (shouldFixMain) {
@@ -3447,17 +3468,25 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
   //if(IVInc2IV.find(incInst) != IVInc2IV.end())
   //  return GetValueName(IVInc2IV[incInst]);
 
+  // YEBIN : add FIXME prefix to vars with no metadata
   std::string Name{Operand->getName()};
   if (Name.empty()) { // Assign unique names to local temporaries.
     unsigned No = AnonValueNumbers.getOrInsert(Operand);
 
-    Name = "_" + utostr(No);
+    Name = utostr(No);
+    //Name = "_" + utostr(No);
     if (!TheModule->getNamedValue(Name)) {
       // Short name for the common case where there's no conflicting global.
-      return Name;
+      return "__FIXME__" + Name;
     }
 
     Name = "tmp_" + Name;
+    //Name = Name + "_tmp";
+  }
+
+  // Mangle globals and also append a FIXME to vars
+  if(isa<GlobalVariable>(Operand)) {
+    return "__FIXME_GLOBAL__" + CBEMangle(Name);
   }
 
   // Mangle globals with the standard mangler interface for LLC compatibility.
@@ -3481,7 +3510,7 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
   }
 
   //return "_" + VarName;
-  return VarName;
+  return "__FIXME__" + VarName;
 }
 
 /// writeInstComputationInline - Emit the computation for the specified
@@ -3671,6 +3700,7 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context, bool sta
       Out << " stderr ";
       return;
     }
+    Out << "//YEBIN: DELETE AND REPLACE\n";
     writeOperand(deleteAndReplaceInsts[inst]);
     return;
   }
@@ -4693,8 +4723,9 @@ void CWriter::generateHeader(Module &M) {
         printedOmpDec = true;
       }
 
-    if(!printedOmpDec)
+    if(!printedOmpDec) {
       printFunctionProto(Out, &*I);
+    }
 
 
     printFunctionAttributes(Out, I->getAttributes());
@@ -6671,6 +6702,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
       if(inst2var.second == signedVar)
         if(Instruction* inst = dyn_cast<Instruction>(inst2var.first))
           signedInsts.insert(inst);
+
   // print local variable information for the function
   bool isDeclared = false;
   if(!IS_OPENMP_FUNCTION){
@@ -6679,6 +6711,23 @@ void CWriter::printFunction(Function &F, bool inlineF) {
         DeclareLocalVariable(&*I, PrintedVar, isDeclared, declaredLocals);
      }
   }
+
+  //YEBIN: run analysis for kernels after var renaming
+  //FIXME: is this the right place?
+  Out << "//YEBIN: this point in function printer\n";
+  if(F.getMetadata("tulip.cuda.kernel.caller")) {
+    runAnalysisOnKernelCaller(F);
+
+    Out << "unsigned threadsPerBlock = 256;\n";
+    //FIXME: add checks for dims and add prints
+    for(auto call: KernelCallDims) {
+      Out << "dim3 block" << call.second.first << "(" << call.second.second.first << ", 1, 1);\n";
+      Out << "dim3 grid" << call.second.first << "((";
+      writeOperand(call.second.second.second);
+      Out << "+block" << call.second.first << ".x-1)/block" << call.second.first << ".x, 1, 1);\n\n";
+    }
+  }
+
 
   if (PrintedVar)
     Out << '\n';
@@ -6988,6 +7037,12 @@ void CWriter::printPHIsIfNecessary(BasicBlock *BB){
           omp_declaredLocals.insert(varName);
       }
       Out << GetValueName(phi) << " = ";
+      //YEBIN: cheat for cuda dims
+      //TODO: deal with collapse
+      if(phi->getMetadata("tulip.cuda.indvar")) {
+        errs() << "YEBIN: PRINT CUDA INDVAR\n";
+        Out << "blockDim.x * blockIdx.x + threadIdx.x + ";
+      }
       writeOperandInternal(phi->getIncomingValueForBlock(BB));
       Out << ";\n";
     }
@@ -8982,6 +9037,98 @@ bool CWriter::RunAllAnalysis(Function &F){
    return Modified;
 }
 
+Value* CWriter::getKernelDim(CallInst* CI) {
+  auto *F = CI->getCalledFunction();
+  for(auto &BB: *F) {
+    for(auto &I: BB) {
+      if(I.getMetadata("tulip.cuda.indvar")) {
+        errs() << "YEBIN: FOUND TULIP INDVAR\n";
+        if(auto *branch = dyn_cast<BranchInst>(BB.getTerminator())) {
+          errs() << "FOUND BRANCH " << *branch << "\n";
+          if(auto *cond = dyn_cast<CmpInst>(branch->getCondition())) {
+            errs() << "FOUND COND " << *cond << "\n";
+            Value* limit;
+            if(cond->getOperand(0) == &I)
+              limit = cond->getOperand(1);
+            else
+              limit = cond->getOperand(0);
+
+            errs() << "NUM OPS: " << F->getNumOperands() << "\n";
+            for(auto &arg: F->args()) {
+              errs() << "YEBIN OPERAND: " << arg << "\n";
+              int idx = std::distance(F->arg_begin(), &arg);
+              if(&arg == limit)
+                return CI->getOperand(idx);
+            }
+          }
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
+void CWriter::runAnalysisOnKernelCaller(Function& F) {
+  assert(F.getMetadata("tulip.cuda.kernel.caller") && "Function does not call CUDA kernel(s)!");
+  DevVarDecls.clear();
+  KernelCallDims.clear();
+  LiveOuts.clear();
+  std::map<CallInst*, std::map<Value*, Value*>> CallArgsMap;
+
+  for(auto &BB: F) {
+    for(auto &I: BB) {
+      if(auto *CallI = dyn_cast<CallInst>(&I))
+        if(CallI->getCalledFunction()->getMetadata("tulip.cuda.kernel")) {
+          int num = CallI->getCalledFunction()->getName().back() - '0';
+          auto *iter = getKernelDim(CallI);
+          assert(iter && "Unable to find kernel limit!\n");
+          KernelCallDims[CallI] = std::make_pair(num, std::make_pair("threadsPerBlock", iter));
+          unsigned i = 0;
+          for(auto& arg: CallI->getCalledFunction()->args()) {
+            auto* op = CallI->getArgOperand(i++);
+            //only need device vars for those passed by reference
+            //TODO: assumes no casting
+            if(Times2Dereference[op]) {
+              DevVarDecls["dev_"+GetValueName(op)] = op;
+              CallArgsMap[CallI][&arg] = op;
+            }
+          }
+        }
+    }
+  }
+  for(auto call: KernelCallDims) {
+    auto *F = call.first->getCalledFunction();
+
+    for(auto &BB: *F) {
+      for(auto &I: BB) {
+        if(auto *store = dyn_cast<StoreInst>(&I)) {
+          auto Ptr = store->getPointerOperand();
+          while(auto GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+            Ptr = GEP->getPointerOperand();
+          }
+          if(auto* op = CallArgsMap[call.first][Ptr])
+          //TODO: insert the call inst argument
+            LiveOuts.insert(op);
+        }
+      }
+    }
+  }
+  for(auto call: KernelCallDims) {
+    auto name = call.first->getCalledFunction()->getName();
+    if(name.contains("cudakernel0")) {
+      auto &C = call.first->getContext();
+      MDNode* MD = MDNode::get(C, MDString::get(C, ""));
+      call.first->setMetadata("tulip.kernel.region.begin", MD);
+    }
+    if(name.contains("cudakernel"+std::to_string(KernelCallDims.size()-1))) {
+      auto &C = call.first->getContext();
+      MDNode* MD = MDNode::get(C, MDString::get(C, ""));
+      call.first->setMetadata("tulip.kernel.region.end", MD);
+    }
+  }
+  return;
+}
+
 void CWriter::omp_findInlinedStructInputs(Value* argInput, std::map<int, Value*> &argInputs){
   std::map<int, Value*>gep2argInput;
   std::map<int, int>gep2typeWidth;
@@ -9134,6 +9281,31 @@ void CWriter::visitCallInst(CallInst &I) {
   //skip barrier
   if(Function *F = I.getCalledFunction())
     if(F->getName() == "__kmpc_barrier") return;
+
+  if(I.getMetadata("tulip.kernel.region.begin")) {
+    for(auto devVar: DevVarDecls) {
+      Out << *devVar.second->getType() << " " << devVar.first << ";\n";
+    }
+    Out << "\n";
+    //FIXME: make sure deref is correct
+    //FIXME: assuming type is not safe...
+    //TODO: how to get size across functions?
+    for(auto devVar: DevVarDecls) {
+      auto* ty = devVar.second->getType();
+      if(auto ptrTy = dyn_cast<PointerType>(ty))
+        ty = ptrTy->getPointerElementType();
+      Out << "cudaMalloc(&" << devVar.first << ", " << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
+    }
+    Out << "\n";
+    for(auto devVar: DevVarDecls) {
+      auto* ty = devVar.second->getType();
+      if(auto ptrTy = dyn_cast<PointerType>(ty))
+        ty = ptrTy->getPointerElementType();
+      Out << "cudaMemcpy(" << devVar.first << ", " << GetValueName(devVar.second) << ", " 
+      << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyHostToDevice);\n";
+    }
+    Out << "\n";
+  }
 
   /*
    * OpenMP: skip omp runtime call
@@ -9376,9 +9548,19 @@ void CWriter::visitCallInst(CallInst &I) {
                   false, std::make_pair(PAL, I.getCallingConv()));
     Out << "*)(void*)";
   }
+  // This is where Callee name is printed
   writeOperand(Callee, ContextCasted);
   if (NeedsCast)
     Out << ')';
+
+  // YEBIN: add grid for cuda kernels
+  // TODO: add grid/block to IR and use those
+  // TODO: add dim3 before function delcaration
+  Function *F = I.getCalledFunction();
+  if(F && F->getName().contains("cudakernel")) {
+    std::string num = std::to_string(KernelCallDims[&I].first);
+    Out << "<<<grid" << num << ", block" << num << ">>>";
+  }
 
   Out << '(';
 
@@ -9397,7 +9579,6 @@ void CWriter::visitCallInst(CallInst &I) {
     ++ArgNo;
   }
 
-  Function *F = I.getCalledFunction();
   if (F) {
     StringRef Name = F->getName();
     // emit cast for the first argument to type expected by header prototype
@@ -9413,7 +9594,7 @@ void CWriter::visitCallInst(CallInst &I) {
     if (PrintedArg)
       Out << ", ";
     if (ArgNo < NumDeclaredParams &&
-        (*AI)->getType() != FTy->getParamType(ArgNo)) {
+        (*AI)->getType() != FTy->getParamType(ArgNo)) {//type casting
       Out << '(';
       printTypeNameUnaligned(
           Out, FTy->getParamType(ArgNo),
@@ -9432,6 +9613,19 @@ void CWriter::visitCallInst(CallInst &I) {
   else
     Out << ")";
 
+  if(I.getMetadata("tulip.kernel.region.end")) {
+    Out << "\n";
+    for(auto devVar: DevVarDecls) {
+      //FIXME: use writeOperand instead of GetValueName directly
+      if(LiveOuts.count(devVar.second)) {
+        auto* ty = devVar.second->getType();
+        if(auto ptrTy = dyn_cast<PointerType>(ty))
+          ty = ptrTy->getPointerElementType();
+        Out << "cudaMemcpy(" << GetValueName(devVar.second) << ", " << devVar.first << ", " 
+      << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyDeviceToHost);\n";
+      }
+    }
+  }
 }
 
 /// visitBuiltinCall - Handle the call to the specified builtin.  Returns true
@@ -10097,15 +10291,17 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
       }
     }
     else if(isa<StructType>(prevType)){
+      auto *StrTy = dyn_cast<StructType>(prevType);
       errs() << "SUSAN: is StructType 10074\n";
+      // YEBIN: change field names to support FIXME
       if(accessMemory){
         //if(currValue2DerefCnt.second){
           //errs() << "SUSAN: is StructType 10079\n";
           //currValue2DerefCnt.second--;
           if(isPointer)
-            Out << "->field" << cast<ConstantInt>(Opnd)->getZExtValue();
+            Out << "->"+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
           else
-            Out << ".field" << cast<ConstantInt>(Opnd)->getZExtValue();
+            Out << "."+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
           isPointer = false;
         //}
         //else{
@@ -10113,9 +10309,9 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
         //}
       } else{
         if(isPointer)
-          Out << "->field" << cast<ConstantInt>(Opnd)->getZExtValue();
+          Out << "->"+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
         else
-          Out << ".field" << cast<ConstantInt>(Opnd)->getZExtValue();
+          Out << "."+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
         isPointer = false;
       }
     }

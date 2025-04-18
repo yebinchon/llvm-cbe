@@ -44,7 +44,7 @@ LinearRegion::LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR, LoopInfo *L
       lr->removeBBToVisit(nextBB);
     BBs.push_back(nextBB);
     errs() << "CBERegion: including " << nextBB->getName() << " in a linear region\n";
-    if(nextBB) errs() << "CBERegion: nextBB " << *nextBB << "\n";
+    //if(nextBB) errs() << "CBERegion: nextBB " << *nextBB << "\n";
     nextBB = nextBB->getSingleSuccessor();
     nextEntryBB = nextBB;
     if(!nextBB || nextBB->getSingleSuccessor() == nullptr) break;
@@ -150,7 +150,7 @@ BasicBlock* IfElseRegion::createSubIfElseRegions(BasicBlock* start, BasicBlock *
 void LoopRegion::createCBERegionDAG(BasicBlock* entryBB){
   BasicBlock *nextRegionEntryBB = entryBB;
   while(!this->hasNoRemainingBBs()){
-    errs() << "CBERegion: here? 149\n";
+    errs() << "YEBIN CBERegion: here? 149\n";
     CBERegion2 *entryR = createSubRegions(this, nextRegionEntryBB);
     LoopBodyRegionDAG.push_back(entryR);
     if(nextRegionEntryBB){
@@ -162,6 +162,11 @@ void LoopRegion::createCBERegionDAG(BasicBlock* entryBB){
 }
 
 void CBERegion2::createCBERegionDAG(BasicBlock* entryBB, CBERegion2 *parentR, BasicBlock *endBB){
+  errs() << "YEBIN: in Function " << entryBB->getParent()->getName();
+  if(parentR)
+    errs() << " with ParentR " << parentR->getEntryBlock()->getName();
+  errs() << "\n";
+  errs() << "YEBIN: creating CBE Region with " << entryBB->getName() << " to " << endBB->getName() << "\n";
   CBERegion2 *entryR = createSubRegions(parentR, entryBB);
   CBERegionDAG.push_back(entryR);
   if(entryBB == endBB) return;
@@ -179,7 +184,7 @@ void LinearRegion::print(){
     errs() << BB->getName() << "\n";
 }
 void IfElseRegion::print(){
-  errs() << "IfElse Region with entry block: " << getEntryBlock()->getName() << "\n";
+  errs() << "IfElse Region with entry block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
   errs() << "thenSubRegions : \n";
   for(auto R : thenSubRegions)
     R->print();
@@ -207,8 +212,10 @@ void LinearRegion::printRegionDAG(){
   }
 }
 void IfElseRegion::printRegionDAG(){
-  errs() << "IfElse Region with entry block: " << getEntryBlock()->getName() << "\n";
+  errs() << "IfElse Region with entry block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
   errs() << "thenSubRegions : \n";
+  for(auto R : thenSubRegions)
+    R->print();
 
   auto condInst = brInst->getCondition();
   //print instructions before the branch
@@ -262,7 +269,9 @@ void LoopRegion::printRegionDAG(){
 
   auto headerBr = dyn_cast<BranchInst>(header->getTerminator());
   if(headerBr->getMetadata("tulip.doall.loop.grid.collapse"))
+  {
     cw->Out << "#pragma omp parallel for collapse(2)";
+  }
   else if(headerBr->getMetadata("tulip.doall.loop.grid")){
     bool printCollapse = false;
     for (BasicBlock *BB : loop->getBlocks()){
@@ -372,12 +381,13 @@ void IfElseRegion::removeIfElseBlockFromLR(LoopRegion* lr, BasicBlock *brBB){
 LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT, DominatorTree *DT, CBERegion2 *parentR, CWriter *cwriter)
   : CBERegion2{ LI, PDT, DT, parentR, entryBB, cwriter}{
     //latch BB isn't considered a loop body;
-    errs() << "creating loop region for entryBB: " << entryBB->getName() << "\n";
+    errs() << "\ncreating loop region for entryBB: " << entryBB->getName() << "\n";
 
     parentRegion = parentR;
     loop = LI->getLoopFor(entryBB);
     latchBB = loop->getLoopLatch();
-    errs() << "SUSAN: loop at 355 " << *loop << "\n";
+    //errs() << "SUSAN: loop at 355 " << *loop << "\n";
+    errs() << "YEBIN For Loop " << loop->getHeader()->getParent()->getName() << "::" << loop->getName() << "\n";
     this->IV = cw->getInductionVariable(loop);
     this->IVInc = cw->getIVIncrement(loop, IV);
     if(LI->getLoopFor(IV->getIncomingBlock(0)) != loop)
@@ -411,11 +421,13 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT
     auto br = dyn_cast<BranchInst>(entryBB->getTerminator());
     auto succ0 = br->getSuccessor(0);
     auto succ1 = br->getSuccessor(1);
+
     BasicBlock *bodyBB = nullptr;
     if(succ0 == nextEntryBB) startBB = succ1;
     else if(succ1 == nextEntryBB) startBB = succ0;
     else assert(0 && "exit block is not from header!\n");
-    errs() << "CBERegion: startBB 393: " << *startBB << "\n";
+    errs() << "YEBIN CBERegion: startBB 393: " << startBB->getParent()->getName() << "::" << startBB->getName() << "\n";
+    //errs() << *startBB << "\n";
     createCBERegionDAG(startBB);
 }
 
