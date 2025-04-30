@@ -53,7 +53,6 @@ LinearRegion::LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR, LoopInfo *L
   }
 }
 
-
 bool IfElseRegion::noElseRegion(bool trueBranch){
   std::set<BasicBlock*> branchBBs = trueBranch ? falseBBs : trueBBs;
   bool NoElseRegion = true;
@@ -65,12 +64,10 @@ bool IfElseRegion::noElseRegion(bool trueBranch){
       }
     }
   }
-  errs() << NoElseRegion << "\n";
   return NoElseRegion;
 }
 
 IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR, PostDominatorTree *PDT, DominatorTree *DT, LoopInfo* LI, CWriter *cwriter) : CBERegion2{ LI, PDT, DT, parentR, entryBB, cwriter}{
-    errs() << "creating if-else region for entryBB: " << entryBB->getName() << "\n";
     /*fetch branch related infos*/
     this->brBB = entryBB;
     this->brInst = dyn_cast<BranchInst>(entryBB->getTerminator());
@@ -79,11 +76,19 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR, PostDominat
     assert(br && "not a branch inst to start if else region\n");
     this->trueStartBB = br->getSuccessor(0);
     this->falseStartBB = br->getSuccessor(1);
-    for(auto &BB : *(brBB->getParent()))
-      if(PDT->dominates(&BB, brBB)){
-        this->pdBB = &BB;
-        break;
-      }
+    //FIXME: Ordering matters, this is the wrong way to do it
+    //for(auto &BB : *(brBB->getParent())) {
+    //  // YEBIN: skip itself!!
+    //  if(&BB == brBB) continue;
+    //  if(PDT->dominates(&BB, brBB)){
+    //    this->pdBB = &BB;
+    //    break;
+    //  }
+    //}
+    //YEBIN: use LLVM IDom directly
+    this->pdBB = PDT->getNode(brBB)->getIDom()->getBlock();
+    assert(this->pdBB && "PostDomBB of branch not found!!\n");
+
     for(auto &BB : *(brBB->getParent())){
       if(DT->dominates(trueStartBB, &BB) && PDT->dominates(pdBB, &BB) && pdBB != &BB)
         trueBBs.insert(&BB);
@@ -100,7 +105,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR, PostDominat
       falseBrOnly = (exitFunctionFalseBr && !exitFunctionTrueBr);
     }
 
-    if(trueBrOnly && returnDominated == -1){
+    if(trueBrOnly && (returnDominated == -1)){
       errs() << "SUSAN: marking only true branch\n";
       if(auto lr = getParentLoopRegion())
         for(auto BB : falseBBs)
@@ -108,7 +113,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR, PostDominat
       createSubIfElseRegions(trueStartBB, brBB, falseStartBB, false);
       nextEntryBB = falseStartBB;
     }
-    else if(falseBrOnly && returnDominated == -1){
+    else if(falseBrOnly && (returnDominated == -1)){
       errs() << "SUSAN: marking only false branch\n";
       if(auto lr = getParentLoopRegion())
         for(auto BB : trueBBs)
@@ -150,13 +155,16 @@ BasicBlock* IfElseRegion::createSubIfElseRegions(BasicBlock* start, BasicBlock *
 void LoopRegion::createCBERegionDAG(BasicBlock* entryBB){
   BasicBlock *nextRegionEntryBB = entryBB;
   while(!this->hasNoRemainingBBs()){
-    errs() << "YEBIN CBERegion: here? 149\n";
     CBERegion2 *entryR = createSubRegions(this, nextRegionEntryBB);
     LoopBodyRegionDAG.push_back(entryR);
+    if(entryBB == this->latchBB) return;
+
+    nextRegionEntryBB = entryR->getNextEntryBB();
+    if(!nextRegionEntryBB) errs() << "Did not detect nextRegion\n";
     if(nextRegionEntryBB){
-      nextRegionEntryBB = entryR->getNextEntryBB();
-      errs() << "SUSAN: nextRegionEntryBB " << nextRegionEntryBB->getName() << "\n";
+      errs() << "SUSAN: nextRegionEntryBB " << nextRegionEntryBB->getName();
       errs() << "for region: " << *(this->loop) << "\n";
+     // createCBERegionDAG(nextRegionEntryBB);
     }
   }
 }
@@ -179,21 +187,23 @@ void CBERegion2::createCBERegionDAG(BasicBlock* entryBB, CBERegion2 *parentR, Ba
 }
 
 void LinearRegion::print(){
-  errs() << "Linear Region with entry block: " << getEntryBlock()->getName() << "\n";
+  errs() << "Linear Region with entering block: " << getEntryBlock()->getName() << "\n";
   for(auto BB : BBs)
     errs() << BB->getName() << "\n";
 }
 void IfElseRegion::print(){
-  errs() << "IfElse Region with entry block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
+  errs() << "IfElse Region with entering block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
   errs() << "thenSubRegions : \n";
   for(auto R : thenSubRegions)
     R->print();
+  errs() << "thenSubRegions end\n";
   errs() << "elseSubRegions : \n";
   for(auto R : elseSubRegions)
     R->print();
+  errs() << "elseSubRegions end\n";
 }
 void LoopRegion::print(){
-  errs() << "Loop Region with entry block: " << getEntryBlock()->getName() << "\n";
+  errs() << "Loop Region with entering block: " << getEntryBlock()->getName() << "\n";
   for(auto R : LoopBodyRegionDAG)
     R->print();
 }
@@ -205,14 +215,14 @@ void CBERegion2::print(){
 }
 
 void LinearRegion::printRegionDAG(){
-  errs() << "Linear Region with entry block: " << getEntryBlock()->getName() << "\n";
+  errs() << "Linear Region with entering block: " << getEntryBlock()->getName() << "\n";
   for(auto BB : BBs){
     errs() << "SUSAN: printing bb:" << BB->getName() << "\n";
     cw->printBasicBlock(BB);
   }
 }
 void IfElseRegion::printRegionDAG(){
-  errs() << "IfElse Region with entry block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
+  errs() << "IfElse Region with entering block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
   errs() << "thenSubRegions : \n";
   for(auto R : thenSubRegions)
     R->print();
@@ -246,7 +256,7 @@ void IfElseRegion::printRegionDAG(){
 }
 
 void LoopRegion::printRegionDAG(){
-  errs() << "Loop Region with entry block: " << getEntryBlock()->getName() << "\n";
+  errs() << "Loop Region with entering block: " << getEntryBlock()->getName() << "\n";
 
   BasicBlock *header = loop->getHeader();
   bool negateCondition = false;
@@ -373,9 +383,11 @@ void CBERegion2::printRegionDAG(){
 }
 
 void IfElseRegion::removeIfElseBlockFromLR(LoopRegion* lr, BasicBlock *brBB){
-  for(auto &BB : *(brBB->getParent()))
-    if(DT->dominates(brBB, &BB) && PDT->dominates(pdBB, &BB) && pdBB != &BB)
+  for(auto &BB : *(brBB->getParent())) {
+    if(DT->dominates(brBB, &BB) && PDT->dominates(pdBB, &BB) && pdBB != &BB) {
       lr->removeBBToVisit(&BB);
+    }
+  }
 }
 
 LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT, DominatorTree *DT, CBERegion2 *parentR, CWriter *cwriter)
@@ -386,7 +398,6 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT
     parentRegion = parentR;
     loop = LI->getLoopFor(entryBB);
     latchBB = loop->getLoopLatch();
-    //errs() << "SUSAN: loop at 355 " << *loop << "\n";
     errs() << "YEBIN For Loop " << loop->getHeader()->getParent()->getName() << "::" << loop->getName() << "\n";
     this->IV = cw->getInductionVariable(loop);
     this->IVInc = cw->getIVIncrement(loop, IV);
@@ -405,7 +416,6 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT
 
     assert(loop && "cannot find loop for a loop region\n");
     nextEntryBB = loop->getUniqueExitBlock();
-    //errs() << "next entry BB: " << nextEntryBB->getName() << "\n";
     assert(nextEntryBB && "loop doesn't have unique exit block\n");
 
     auto loopBBs = loop->getBlocks();
@@ -414,7 +424,7 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT
       if(lr)
         lr->removeBBToVisit(BB);
       if(BB != entryBB && BB != latchBB)
-        remainingBBsToVisit.insert(BB);
+        addBBToVisit(BB);
     }
 
     BasicBlock* startBB = entryBB;
@@ -427,28 +437,39 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT
     else if(succ1 == nextEntryBB) startBB = succ0;
     else assert(0 && "exit block is not from header!\n");
     errs() << "YEBIN CBERegion: startBB 393: " << startBB->getParent()->getName() << "::" << startBB->getName() << "\n";
-    //errs() << *startBB << "\n";
     createCBERegionDAG(startBB);
 }
 
 CBERegion2* CBERegion2::createSubRegions(CBERegion2 *parentR, BasicBlock* entryBB){
   CBERegion2 *R = nullptr;
+  if(!parentR) {
+    errs() << "YEBIN: new topmost region\n";
+  }
+  else {
+    auto parentBB = parentR->getEntryBlock();
+    if(parentR->isaLoopRegion())
+      errs() << "YEBIN: new region in loop " << parentBB->getParent()->getName() << "::" << parentBB->getName() << "\n";
+    else if(parentR->isaLinearRegion())
+      errs() << "YEBIN: new region in linear " << parentBB->getParent()->getName() << "::" << parentBB->getName() << "\n";
+    else if(parentR->isaIfElseRegion())
+      errs() << "YEBIN: new region in ifelse " << parentBB->getParent()->getName() << "::" << parentBB->getName() << "\n";
+  } 
   switch (whichRegion(entryBB, LI)){
     case 0:
     {
-      errs() << "SUSAN: entry block is a linear region! " << entryBB->getName() << "\n";
+      errs() << "SUSAN: block is a linear region! " << entryBB->getName() << "\n";
       R = new LinearRegion(entryBB, parentR, LI, PDT, DT, this->cw);
       break;
     }
     case 1:
     {
-      errs() << "SUSAN: entry block is an if-else region! " << entryBB->getName() << "\n";
+      errs() << "SUSAN: block is an if-else region! " << entryBB->getName() << "\n";
       R = new IfElseRegion(entryBB, parentR, PDT, DT, LI, this->cw);
       break;
     }
     case 2:
     {
-      errs() << "SUSAN: entry block is a loop region! " << entryBB->getName() << "\n";
+      errs() << "SUSAN: block is a loop region! " << entryBB->getName() << "\n";
       R = new LoopRegion(entryBB, LI, PDT, DT, parentR, this->cw);
       break;
     }
