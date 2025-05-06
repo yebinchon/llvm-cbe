@@ -222,6 +222,9 @@ void LinearRegion::printRegionDAG(){
   }
 }
 void IfElseRegion::printRegionDAG(){
+  if(!this->parentRegion || this->parentRegion->isaLinearRegion())
+    cw->Out << "//INSERT COMMENT IFELSE: " << this->entryBlock->getName() << "\n";
+
   errs() << "IfElse Region with entering block: " << getEntryBlock()->getParent()->getName() << "::" << getEntryBlock()->getName() << "\n";
   errs() << "thenSubRegions : \n";
   for(auto R : thenSubRegions)
@@ -256,6 +259,8 @@ void IfElseRegion::printRegionDAG(){
 }
 
 void LoopRegion::printRegionDAG(){
+  if(!this->parentRegion || this->parentRegion->isaLinearRegion())
+    cw->Out << "//INSERT COMMENT LOOP: " << this->entryBlock->getName() << "\n";
   errs() << "Loop Region with entering block: " << getEntryBlock()->getName() << "\n";
 
   BasicBlock *header = loop->getHeader();
@@ -280,19 +285,23 @@ void LoopRegion::printRegionDAG(){
   auto headerBr = dyn_cast<BranchInst>(header->getTerminator());
   if(headerBr->getMetadata("tulip.doall.loop.grid.collapse"))
   {
-    cw->Out << "#pragma omp parallel for collapse(2)";
+    //cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
+    cw->Out << "#pragma omp parallel for collapse(2)\n";
   }
   else if(headerBr->getMetadata("tulip.doall.loop.grid")){
     bool printCollapse = false;
     for (BasicBlock *BB : loop->getBlocks()){
       if(BB->getTerminator()->getMetadata("tulip.doall.loop.block")){
-        cw->Out << "#pragma omp parallel for collapse(2)";
+        //cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
+        cw->Out << "#pragma omp parallel for collapse(2)\n";
         printCollapse = true;
         break;
       }
     }
-    if(!printCollapse)
+    if(!printCollapse) {
+      //cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
       cw->Out << "#pragma omp parallel for";
+    }
   }
   else if(headerBr->getMetadata("noelle.doall.loop")){
     bool printReduction = false;
@@ -300,14 +309,17 @@ void LoopRegion::printRegionDAG(){
       for(auto &I : *BB){
         if(I.getMetadata("tulip.reduce.add")){
           printReduction = true;
+          //cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
           cw->Out << "#pragma omp simd reduction(+:";
           cw->writeOperand(&I);
-          cw->Out << ")";
+          cw->Out << ")\n";
         }
       }
     }
-    if(!printReduction)
-      cw->Out << "#pragma omp parallel for ";
+    if(!printReduction) {
+      //cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
+      cw->Out << "#pragma omp parallel for \n";
+    }
   }
 
   //for (BasicBlock *BB : loop->getBlocks()){
@@ -334,7 +346,7 @@ void LoopRegion::printRegionDAG(){
   //  }
   //}
 
-  cw->Out << "\nfor(";
+  cw->Out << "for(";
 
   //initiation
   cw->printTypeName(cw->Out, IV->getType(), true);
@@ -412,7 +424,7 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI, PostDominatorTree* PDT
     bool negateCondition = false;
     Instruction *condInst = cw->findCondInst(loop, negateCondition);
     this->ub = condInst->getOperand(1);
-    this->nestlevel = -1;
+    this->nestlevel = LI->getLoopDepth(entryBB);
 
     assert(loop && "cannot find loop for a loop region\n");
     nextEntryBB = loop->getUniqueExitBlock();
