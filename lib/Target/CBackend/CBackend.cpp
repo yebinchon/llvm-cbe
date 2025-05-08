@@ -3667,8 +3667,13 @@ void CWriter::writeOperandInternal(Value *Operand,
   if (CPV && !isa<GlobalValue>(CPV)){
     printConstant(CPV, Context);
   }
-  else
-    Out << GetValueName(Operand);
+  else {
+    if(isa<Function>(Operand)) {
+      Out << demangleFunctionName(GetValueName(Operand));
+    }
+    else
+      Out << GetValueName(Operand);
+  }
 }
 
 void CWriter::writeOperand(Value *Operand, enum OperandContext Context, bool startExpression) {
@@ -3712,7 +3717,6 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context, bool sta
       Out << " stderr ";
       return;
     }
-    Out << "//YEBIN: DELETE AND REPLACE\n";
     writeOperand(deleteAndReplaceInsts[inst]);
     return;
   }
@@ -6669,7 +6673,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
    */
   if(!inlineF){
     if(F.getName() != "main")
-      Out << "//INSERT COMMENT FUNCTION: " << F.getName() << "\n";
+      Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName()) << "\n";
 
     if(IS_OPENMP_FUNCTION)
       printFunctionProto(Out, FTy,
