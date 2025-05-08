@@ -87,23 +87,19 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   this->trueStartBB = br->getSuccessor(0);
   this->falseStartBB = br->getSuccessor(1);
   // FIXME: Ordering matters, this is the wrong way to do it
-  for (auto &BB : *(brBB->getParent())) {
-    // YEBIN: skip itself!!
-    if (&BB == brBB)
-      continue;
-    if (PDT->dominates(&BB, brBB)) {
-      errs() << "YEBIN: FOUND PDOM " << BB.getName() << "\n";
-      // this->pdBB = &BB;
-      // break;
-    }
-  }
+  // for(auto &BB : *(brBB->getParent())) {
+  //   // YEBIN: skip itself!!
+  //   if(&BB == brBB) continue;
+  //   if(PDT->dominates(&BB, brBB)){
+  //     this->pdBB = &BB;
+  //     break;
+  //   }
+  // }
   // YEBIN: use LLVM IDom directly
   this->pdBB = PDT->getNode(brBB)->getIDom()->getBlock();
   assert(this->pdBB && "PostDomBB of branch not found!!\n");
 
-  errs() << "ANDREW: looping through BB parents\n";
   for (auto &BB : *(brBB->getParent())) {
-    errs() << "ANDREW: BB Name: " << BB.getName() << "\n";
     if (DT->dominates(trueStartBB, &BB) && PDT->dominates(pdBB, &BB) &&
         pdBB != &BB)
       trueBBs.insert(&BB);
@@ -255,6 +251,10 @@ void LinearRegion::printRegionDAG() {
   }
 }
 void IfElseRegion::printRegionDAG() {
+  if (!this->parentRegion || this->parentRegion->isaLinearRegion())
+    cw->Out << "//INSERT COMMENT IFELSE: " << this->entryBlock->getName()
+            << "\n";
+
   errs() << "IfElse Region with entering block: "
          << getEntryBlock()->getParent()->getName()
          << "::" << getEntryBlock()->getName() << "\n";
@@ -291,6 +291,8 @@ void IfElseRegion::printRegionDAG() {
 }
 
 void LoopRegion::printRegionDAG() {
+  if (!this->parentRegion || this->parentRegion->isaLinearRegion())
+    cw->Out << "//INSERT COMMENT LOOP: " << this->entryBlock->getName() << "\n";
   errs() << "Loop Region with entering block: " << getEntryBlock()->getName()
          << "\n";
 
@@ -315,58 +317,66 @@ void LoopRegion::printRegionDAG() {
 
   auto headerBr = dyn_cast<BranchInst>(header->getTerminator());
   if (headerBr->getMetadata("tulip.doall.loop.grid.collapse")) {
-    cw->Out << "#pragma omp parallel for collapse(2)";
+    // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
+    cw->Out << "#pragma omp parallel for collapse(2)\n";
   } else if (headerBr->getMetadata("tulip.doall.loop.grid")) {
     bool printCollapse = false;
     for (BasicBlock *BB : loop->getBlocks()) {
       if (BB->getTerminator()->getMetadata("tulip.doall.loop.block")) {
-        cw->Out << "#pragma omp parallel for collapse(2)";
+        // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
+        cw->Out << "#pragma omp parallel for collapse(2)\n";
         printCollapse = true;
         break;
       }
     }
-    if (!printCollapse)
+    if (!printCollapse) {
+      // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
       cw->Out << "#pragma omp parallel for";
+    }
   } else if (headerBr->getMetadata("noelle.doall.loop")) {
     bool printReduction = false;
     for (BasicBlock *BB : loop->getBlocks()) {
       for (auto &I : *BB) {
         if (I.getMetadata("tulip.reduce.add")) {
           printReduction = true;
+          // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
           cw->Out << "#pragma omp simd reduction(+:";
           cw->writeOperand(&I);
-          cw->Out << ")";
+          cw->Out << ")\n";
         }
       }
     }
-    if (!printReduction)
-      cw->Out << "#pragma omp parallel for ";
+
+    if (!printReduction) {
+      // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
+      cw->Out << "#pragma omp parallel for \n";
+    }
   }
 
   // for (BasicBlock *BB : loop->getBlocks()){
-  //  for(auto &I : *BB){
-  //    if(I.getMetadata("tulip.reduce.add")){
-  //      cw->Out << "#pragma omp simd reduction(+:";
-  //      cw->writeOperand(&I);
-  //      cw->Out << ")";
-  //    }
-  //    else if(I.getMetadata("tulip.arr.reduce.add")){
-  //      cw->Out << "#pragma omp simd reduction(+:";
-  //      GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(&I);
-  //      Value *ptr = gep->getPointerOperand();
-  //      cw->Out<<cw->GetValueName(ptr);
-  //      PointerType *ptrTy = dyn_cast<PointerType>(ptr->getType());
-  //      cw->Out << "[0:";
-  //      assert(ptrTy && "CBERegion: not a pointer type? 288\n");
-  //      ArrayType* arrTy =
-  //      dyn_cast<ArrayType>(ptrTy->getPointerElementType()); assert(arrTy &&
-  //      "CBERegion: not an array type? 290\n"); cw->Out <<
-  //      arrTy->getNumElements(); cw->Out << "]"; cw->Out << ")";
-  //    }
-  //  }
-  //}
+  //   for(auto &I : *BB){
+  //     if(I.getMetadata("tulip.reduce.add")){
+  //       cw->Out << "#pragma omp simd reduction(+:";
+  //       cw->writeOperand(&I);
+  //       cw->Out << ")";
+  //     }
+  //     else if(I.getMetadata("tulip.arr.reduce.add")){
+  //       cw->Out << "#pragma omp simd reduction(+:";
+  //       GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(&I);
+  //       Value *ptr = gep->getPointerOperand();
+  //       cw->Out<<cw->GetValueName(ptr);
+  //       PointerType *ptrTy = dyn_cast<PointerType>(ptr->getType());
+  //       cw->Out << "[0:";
+  //       assert(ptrTy && "CBERegion: not a pointer type? 288\n");
+  //       ArrayType* arrTy =
+  //       dyn_cast<ArrayType>(ptrTy->getPointerElementType()); assert(arrTy &&
+  //       "CBERegion: not an array type? 290\n"); cw->Out <<
+  //       arrTy->getNumElements(); cw->Out << "]"; cw->Out << ")";
+  //     }
+  //   }
+  // }
 
-  cw->Out << "\nfor(";
+  cw->Out << "for(";
 
   // initiation
   cw->printTypeName(cw->Out, IV->getType(), true);
@@ -450,7 +460,8 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
   bool negateCondition = false;
   Instruction *condInst = cw->findCondInst(loop, negateCondition);
   this->ub = condInst->getOperand(1);
-  this->nestlevel = -1;
+
+  this->nestlevel = LI->getLoopDepth(entryBB);
 
   assert(loop && "cannot find loop for a loop region\n");
   nextEntryBB = loop->getUniqueExitBlock();

@@ -83,7 +83,7 @@ typedef struct LoopProfile{
   int chunksize;
 } LoopProfile;
 
-
+std::string demangleFunctionName(std::string str);
 
 
 /// CWriter - This class is the main chunk of code that converts an LLVM

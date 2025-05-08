@@ -43,6 +43,9 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
+// YEBIN: added libs
+#include "llvm/Demangle/Demangle.h"
+
 // Jackson Korba 9/29/14
 #ifndef DEBUG_TYPE
 #define DEBUG_TYPE ""
@@ -1066,9 +1069,7 @@ Value *CWriter::findOriginalUb(Function &F, Value *ub, CallInst *initCI,
 }
 
 void CWriter::omp_preprossesing(Function &F) {
-
   // FIXME: currently only searching for the loop to be processed
-
   // find __kmpc_for_static_init and associated loop info
   Value *lb, *ub, *incr;
   int schedtype, chunksize;
@@ -2557,6 +2558,9 @@ raw_ostream &CWriter::printFunctionProto(
     iterator_range<Function::arg_iterator> *ArgList, int skipArgSteps) {
   bool shouldFixMain = (Name == "main" && isStandardMain(FTy));
 
+  // TODO: make sure uses of Name are properly swapped
+  std::string demangledName = demangleFunctionName(Name);
+
   AttributeList &PAL = Attrs.first;
 
   if (PAL.hasAttribute(AttributeList::FunctionIndex, Attribute::NoReturn)) {
@@ -2609,7 +2613,7 @@ raw_ostream &CWriter::printFunctionProto(
     errorWithMessage("Encountered Unhandled Calling Convention");
     break;
   }
-  Out << ' ' << Name << '(';
+  Out << ' ' << demangledName << '(';
 
   unsigned Idx = 1;
   bool PrintedArg = false;
@@ -3469,6 +3473,12 @@ void CWriter::printConstantWithCast(Constant *CPV, unsigned Opcode) {
     printConstant(CPV, ContextCasted);
 }
 
+std::string demangleFunctionName(std::string str) {
+  std::string FuncName = demangle(str);
+
+  return FuncName.substr(0, FuncName.find("("));
+}
+
 std::string demangleVariableName(std::string var) {
   SmallVector<std::string, 16> splitedStrs;
 
@@ -3744,8 +3754,12 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
 
   if (CPV && !isa<GlobalValue>(CPV)) {
     printConstant(CPV, Context);
-  } else
-    Out << GetValueName(Operand);
+  } else {
+    if (isa<Function>(Operand)) {
+      Out << demangleFunctionName(GetValueName(Operand));
+    } else
+      Out << GetValueName(Operand);
+  }
 }
 
 void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
@@ -3791,7 +3805,6 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
       Out << " stderr ";
       return;
     }
-    Out << "//YEBIN: DELETE AND REPLACE\n";
     writeOperand(deleteAndReplaceInsts[inst]);
     return;
   }
@@ -4734,10 +4747,8 @@ void CWriter::generateHeader(Module &M) {
       continue;
     if ((&*I)->getName().contains("strtol"))
       continue;
-    if ((&*I)->getName().contains("fprintf")) {
-      std::cerr << "ANDREW: fprintf seen \n";
+    if ((&*I)->getName().contains("fprintf"))
       continue;
-    }
     if ((&*I)->getName().contains("atoll"))
       continue;
     if ((&*I)->getName().contains("calloc"))
@@ -4769,9 +4780,6 @@ void CWriter::generateHeader(Module &M) {
       continue;
     if ((&*I)->getName().contains("memcpy"))
       continue;
-    if ((&*I)->getName().contains("stderr"))
-      continue;
-
     // if((&*I)->getName().contains("xmalloc")) continue;
     //  Don't print declarations for intrinsic functions.
     //  Store the used intrinsics, which need to be explicitly defined.
@@ -6274,8 +6282,10 @@ void CWriter::printContainedTypes(raw_ostream &Out, Type *Ty,
   if (!TypesPrinted.insert(Ty).second)
     return;
   // Skip empty structs
-  if (isEmptyType(Ty))
+  if (isEmptyType(Ty)) {
+    errs() << "YEBIN: " << Ty->getStructName() << " is Empty\n";
     return;
+  }
 
   // Print all contained types first.
   for (Type::subtype_iterator I = Ty->subtype_begin(), E = Ty->subtype_end();
@@ -6812,6 +6822,9 @@ void CWriter::printFunction(Function &F, bool inlineF) {
    * OpenMP: remove first two args from outline
    */
   if (!inlineF) {
+    if (F.getName() != "main")
+      Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
+          << "\n";
     if (IS_OPENMP_FUNCTION)
       printFunctionProto(Out, FTy,
                          std::make_pair(F.getAttributes(), F.getCallingConv()),
@@ -6871,7 +6884,6 @@ void CWriter::printFunction(Function &F, bool inlineF) {
 
   // YEBIN: run analysis for kernels after var renaming
   // FIXME: is this the right place?
-  Out << "//YEBIN: this point in function printer\n";
   if (F.getMetadata("tulip.cuda.kernel.caller")) {
     runAnalysisOnKernelCaller(F);
 
@@ -7089,7 +7101,6 @@ BasicBlock *findDoWhileExitingLatchBlock(Loop *L) {
 Instruction *CWriter::findCondInst(Loop *L, bool &negateCondition) {
   auto header = L->getHeader();
   Instruction *term = header->getTerminator();
-  errs() << "term 6818: " << *term << "\n";
   BranchInst *brInst = dyn_cast<BranchInst>(term);
   Value *cond = brInst->getCondition();
   if (isa<CmpInst>(cond) || isa<UnaryInstruction>(cond) ||
