@@ -39,9 +39,9 @@
 #include <utility>
 
 // SUSAN: added libs
-#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 // YEBIN: added libs
 #include "llvm/Demangle/Demangle.h"
@@ -90,10 +90,7 @@ extern "C" void LLVMInitializeCBackendTarget() {
   RegisterTargetMachine<CTargetMachine> X(TheCBackendTarget);
 }
 #if LLVM_VERSION_MAJOR >= 12
-bool IsPowerOfTwo(unsigned long x)
-{
-  return (x & (x - 1)) == 0;
-}
+bool IsPowerOfTwo(unsigned long x) { return (x & (x - 1)) == 0; }
 #endif
 
 unsigned int NumberOfElements(VectorType *TheType) {
@@ -123,16 +120,21 @@ enum UnaryOps {
   }
 #endif
 
-static bool changeMapValue(
-    std::map<Instruction*, std::map<std::string, Instruction*>> prevMRVar2ValMap,
-    std::map<Instruction*, std::map<std::string, Instruction*>> currMRVar2ValMap, Function &F){
+static bool
+changeMapValue(std::map<Instruction *, std::map<std::string, Instruction *>>
+                   prevMRVar2ValMap,
+               std::map<Instruction *, std::map<std::string, Instruction *>>
+                   currMRVar2ValMap,
+               Function &F) {
 
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-    auto prev =  prevMRVar2ValMap[&*I];
-    auto curr =  currMRVar2ValMap[&*I];
-    for(auto &[prev_var, prev_val] : prev){
-      if(curr.find(prev_var) == curr.end()) return false;
-      if(curr[prev_var] != prev_val) return false;
+    auto prev = prevMRVar2ValMap[&*I];
+    auto curr = currMRVar2ValMap[&*I];
+    for (auto &[prev_var, prev_val] : prev) {
+      if (curr.find(prev_var) == curr.end())
+        return false;
+      if (curr[prev_var] != prev_val)
+        return false;
     }
   }
 
@@ -145,14 +147,15 @@ static bool isConstantNull(Value *V) {
   return false;
 }
 
-static bool isNegative(Value *V){
+static bool isNegative(Value *V) {
   if (ConstantInt *C = dyn_cast<ConstantInt>(V))
     return C->isNegative();
   return false;
 }
 
 static bool isEmptyType(Type *Ty) {
-  if(!Ty) return false;
+  if (!Ty)
+    return false;
   if (StructType *STy = dyn_cast<StructType>(Ty))
     return STy->getNumElements() == 0 ||
            std::all_of(STy->element_begin(), STy->element_end(), isEmptyType);
@@ -194,34 +197,39 @@ bool CWriter::isInlinableInst(Instruction &I) const {
   // expressions.  GCC generates horrible code if we don't.
   //
 
-  //if it's a store that is over written by another store in the same basic block, then it's inlinable
-  if(StoreInst *store = dyn_cast<StoreInst>(&I)){
+  // if it's a store that is over written by another store in the same basic
+  // block, then it's inlinable
+  if (StoreInst *store = dyn_cast<StoreInst>(&I)) {
     Value *dest = store->getPointerOperand();
-    for(auto it = store->getIterator(); it != store->getParent()->end(); ++it){
-      if(&*it == store)
+    for (auto it = store->getIterator(); it != store->getParent()->end();
+         ++it) {
+      if (&*it == store)
         continue;
-      if(isa<StoreInst>(&*it) && dest == (&*it)->getOperand(1))
-          return true;
+      if (isa<StoreInst>(&*it) && dest == (&*it)->getOperand(1))
+        return true;
     }
   }
 
-  if (isa<LoadInst>(I) || isa<CmpInst>(I) || isa<GetElementPtrInst>(I) || isa<CastInst>(I))
+  if (isa<LoadInst>(I) || isa<CmpInst>(I) || isa<GetElementPtrInst>(I) ||
+      isa<CastInst>(I))
     return true;
 
-//
-//  if(isa<BinaryOperator>(&I) && notInlinableBinOps.find(&I) == notInlinableBinOps.end())
-//    return true;
+  //
+  //  if(isa<BinaryOperator>(&I) && notInlinableBinOps.find(&I) ==
+  //  notInlinableBinOps.end())
+  //    return true;
 
-  //exit condition can be inlined
-  if(isa<CallInst>(I) && loopCondCalls.find(dyn_cast<CallInst>(&I)) != loopCondCalls.end())
+  // exit condition can be inlined
+  if (isa<CallInst>(I) &&
+      loopCondCalls.find(dyn_cast<CallInst>(&I)) != loopCondCalls.end())
     return true;
 
   // Must be an expression, must be used exactly once.  If it is dead, we
   // emit it inline where it would go.
   if (isEmptyType(I.getType()) || !I.hasOneUse() || I.isTerminator() ||
-      //isa<CallInst>(I) || isa<PHINode>(I) || isa<LoadInst>(I) ||
-      isa<CallInst>(I) || isa<PHINode>(I) ||
-      isa<VAArgInst>(I) || isa<InsertElementInst>(I) || isa<InsertValueInst>(I))
+      // isa<CallInst>(I) || isa<PHINode>(I) || isa<LoadInst>(I) ||
+      isa<CallInst>(I) || isa<PHINode>(I) || isa<VAArgInst>(I) ||
+      isa<InsertElementInst>(I) || isa<InsertValueInst>(I))
     // Don't inline a load across a store or other bad things!
     return false;
 
@@ -258,447 +266,460 @@ bool CWriter::isInlineAsm(Instruction &I) const {
     return false;
 }
 
-// an 'if' or 'switch' returns only if the branch's returning or its successor has return statement
-BasicBlock* isExitingFunction(BasicBlock* bb){
+// an 'if' or 'switch' returns only if the branch's returning or its successor
+// has return statement
+BasicBlock *isExitingFunction(BasicBlock *bb) {
   Instruction *term = bb->getTerminator();
-  if(isa<ReturnInst>(term))
+  if (isa<ReturnInst>(term))
     return bb;
 
-  if(term->getNumSuccessors() > 1)
+  if (term->getNumSuccessors() > 1)
     return nullptr;
 
-  if(isa<UnreachableInst>(term))
+  if (isa<UnreachableInst>(term))
     return bb;
 
   BasicBlock *succ = term->getSuccessor(0);
   Instruction *ret = succ->getTerminator();
 
-  if(isa<ReturnInst>(ret)) return succ;
-  else return nullptr;
+  if (isa<ReturnInst>(ret))
+    return succ;
+  else
+    return nullptr;
 }
 
-void directPathFromAtoBwithoutC(BasicBlock *fromBB, BasicBlock *toBB, BasicBlock *avoidBB,
-      std::set<BasicBlock*> &visited, std::set<BasicBlock*> &path, bool &foundPathWithoutC){
-
+void directPathFromAtoBwithoutC(BasicBlock *fromBB, BasicBlock *toBB,
+                                BasicBlock *avoidBB,
+                                std::set<BasicBlock *> &visited,
+                                std::set<BasicBlock *> &path,
+                                bool &foundPathWithoutC) {
 
   visited.insert(fromBB);
   path.insert(fromBB);
 
-  if(fromBB == toBB){
-    if(path.find(avoidBB) == path.end())
+  if (fromBB == toBB) {
+    if (path.find(avoidBB) == path.end())
       foundPathWithoutC = true;
-  }
-  else{
-    for (auto succ = succ_begin(fromBB); succ != succ_end(fromBB); ++succ){
+  } else {
+    for (auto succ = succ_begin(fromBB); succ != succ_end(fromBB); ++succ) {
       BasicBlock *succBB = *succ;
-      if(visited.find(succBB) == visited.end())
-        directPathFromAtoBwithoutC(succBB, toBB, avoidBB, visited, path, foundPathWithoutC);
+      if (visited.find(succBB) == visited.end())
+        directPathFromAtoBwithoutC(succBB, toBB, avoidBB, visited, path,
+                                   foundPathWithoutC);
     }
   }
   visited.erase(fromBB);
 }
 
-bool directPathFromAtoBwithoutC(BasicBlock *fromBB, BasicBlock *toBB, BasicBlock *avoidBB){
+bool directPathFromAtoBwithoutC(BasicBlock *fromBB, BasicBlock *toBB,
+                                BasicBlock *avoidBB) {
 
-  std::set<BasicBlock*> visited;
-  std::set<BasicBlock*> path;
+  std::set<BasicBlock *> visited;
+  std::set<BasicBlock *> path;
   bool foundPathWithoutC = false;
 
-  //if(!isPotentiallyReachable(fromBB, avoidBB)) return true;
+  // if(!isPotentiallyReachable(fromBB, avoidBB)) return true;
 
-  directPathFromAtoBwithoutC(fromBB, toBB, avoidBB, visited, path, foundPathWithoutC);
+  directPathFromAtoBwithoutC(fromBB, toBB, avoidBB, visited, path,
+                             foundPathWithoutC);
   return foundPathWithoutC;
 }
 
-CBERegion* CWriter::findRegionOfBlock(BasicBlock* BB){
-  std::queue<CBERegion*> toVisit;
+CBERegion *CWriter::findRegionOfBlock(BasicBlock *BB) {
+  std::queue<CBERegion *> toVisit;
   toVisit.push(topRegion);
-  while(!toVisit.empty()){
+  while (!toVisit.empty()) {
     CBERegion *currNode = toVisit.front();
     toVisit.pop();
 
-    if(currNode->entryBlock == BB) return currNode;
+    if (currNode->entryBlock == BB)
+      return currNode;
 
     CBERegionMap[currNode->entryBlock] = currNode;
-    for(CBERegion *subRegion : currNode->thenSubRegions){
+    for (CBERegion *subRegion : currNode->thenSubRegions) {
       toVisit.push(subRegion);
     }
-    for(CBERegion *subRegion : currNode->elseSubRegions){
+    for (CBERegion *subRegion : currNode->elseSubRegions) {
       toVisit.push(subRegion);
     }
   }
   return nullptr;
 }
 
-bool CWriter::alreadyVisitedRegion (BasicBlock* bbUT){
-  std::set<CBERegion*> regions;
-  for(auto &[region, bb] : recordedRegionBBs){
-    if(bb == bbUT)
+bool CWriter::alreadyVisitedRegion(BasicBlock *bbUT) {
+  std::set<CBERegion *> regions;
+  for (auto &[region, bb] : recordedRegionBBs) {
+    if (bb == bbUT)
       return true;
   }
   return false;
 }
 
-void CWriter::CountTimes2bePrintedByRegionPath(){
-  std::stack<CBERegion*> toVisit;
+void CWriter::CountTimes2bePrintedByRegionPath() {
+  std::stack<CBERegion *> toVisit;
 
   toVisit.push(topRegion);
 
-  while(!toVisit.empty()){
+  while (!toVisit.empty()) {
     CBERegion *currRegion = toVisit.top();
     toVisit.pop();
 
-    //if(currRegion->thenSubRegions.empty() && currRegion->elseSubRegions.empty()){
-    //  errs() << "currRegion: " << *currRegion->br << "\n";
-    //  CBERegion* parent = currRegion->parentRegion;
-    //  std::set<BasicBlock*> blocks2cnt;
-    //  while(parent){
-    //    for(auto bb : currRegion->thenBBs){
-    //      if(std::count(parent->thenBBs.begin(), parent->thenBBs.end(), bb))
-    //        blocks2cnt.insert(bb);
-    //      if(std::count(parent->elseBBs.begin(), parent->elseBBs.end(), bb))
-    //        blocks2cnt.insert(bb);
-    //    }
-    //    for(auto bb : currRegion->elseBBs){
-    //      if(std::count(parent->thenBBs.begin(), parent->thenBBs.end(), bb))
-    //        blocks2cnt.insert(bb);
-    //      if(std::count(parent->elseBBs.begin(), parent->elseBBs.end(), bb))
-    //        blocks2cnt.insert(bb);
-    //    }
-    //    child = parent;
-    //    parent = parent->parentRegion;
-    //  }
-
+    // if(currRegion->thenSubRegions.empty() &&
+    // currRegion->elseSubRegions.empty()){
+    //   errs() << "currRegion: " << *currRegion->br << "\n";
+    //   CBERegion* parent = currRegion->parentRegion;
+    //   std::set<BasicBlock*> blocks2cnt;
+    //   while(parent){
+    //     for(auto bb : currRegion->thenBBs){
+    //       if(std::count(parent->thenBBs.begin(), parent->thenBBs.end(), bb))
+    //         blocks2cnt.insert(bb);
+    //       if(std::count(parent->elseBBs.begin(), parent->elseBBs.end(), bb))
+    //         blocks2cnt.insert(bb);
+    //     }
+    //     for(auto bb : currRegion->elseBBs){
+    //       if(std::count(parent->thenBBs.begin(), parent->thenBBs.end(), bb))
+    //         blocks2cnt.insert(bb);
+    //       if(std::count(parent->elseBBs.begin(), parent->elseBBs.end(), bb))
+    //         blocks2cnt.insert(bb);
+    //     }
+    //     child = parent;
+    //     parent = parent->parentRegion;
+    //   }
 
     //}
 
-    for(auto bb : currRegion->thenBBs){
-      if(returnDominated && currRegion == topRegion
-          && isa<ReturnInst>(bb->getTerminator())){
+    for (auto bb : currRegion->thenBBs) {
+      if (returnDominated && currRegion == topRegion &&
+          isa<ReturnInst>(bb->getTerminator())) {
         errs() << "SUSAN: found duplicated then return BB\n";
         continue;
       }
       times2bePrinted[bb]++;
     }
-    for(auto bb : currRegion->elseBBs){
-      if(returnDominated && currRegion == topRegion
-          && isa<ReturnInst>(bb->getTerminator())){
+    for (auto bb : currRegion->elseBBs) {
+      if (returnDominated && currRegion == topRegion &&
+          isa<ReturnInst>(bb->getTerminator())) {
         errs() << "SUSAN: found duplicated else return BB\n";
         continue;
       }
       times2bePrinted[bb]++;
     }
 
-    for(auto subRegion : currRegion->thenSubRegions)
+    for (auto subRegion : currRegion->thenSubRegions)
       toVisit.push(subRegion);
-    for(auto subRegion : currRegion->elseSubRegions)
+    for (auto subRegion : currRegion->elseSubRegions)
       toVisit.push(subRegion);
+  }
+}
 
+CBERegion *CWriter::createNewRegion(BasicBlock *entryBB, CBERegion *parentR,
+                                    bool isElseRegion) {
+  // create a new region
+  CBERegion *newR = new CBERegion();
+  newR->parentRegion = parentR;
+  if (isElseRegion)
+    parentR->elseSubRegions.push_back(newR);
+  else
+    parentR->thenSubRegions.push_back(newR);
+  newR->entryBlock = entryBB;
+  recordedRegionBBs[newR] = entryBB;
+  return newR;
+}
+
+void CWriter::markBranchRegion(Instruction *br, CBERegion *targetRegion) {
+  errs() << "=================SUSAN: START OF marking region : "
+         << br->getParent()->getName() << "==================\n";
+  BasicBlock *currBB = br->getParent();
+
+  // analyse the branch properties
+  BasicBlock *exitingBB = currBB;
+  BasicBlock *exitLoopTrueBB = nullptr;
+  BasicBlock *exitLoopFalseBB = nullptr;
+  for (unsigned int i_succ = 0; i_succ < br->getNumSuccessors(); ++i_succ) {
+    BasicBlock *exitBB = br->getSuccessor(i_succ);
+    for (auto edge : irregularLoopExits) {
+      if (edge.first == exitingBB && edge.second == exitBB) {
+        if (i_succ == 0)
+          exitLoopTrueBB = exitBB;
+        else if (i_succ == 1)
+          exitLoopFalseBB = exitBB;
+      }
+    }
+  }
+  BasicBlock *brBB = currBB;
+  BasicBlock *trueStartBB = br->getSuccessor(0);
+  BasicBlock *falseStartBB = br->getSuccessor(1);
+  bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
+  bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
+  bool trueBrOnly = noElseRegion(true, brBB);
+  bool falseBrOnly = noElseRegion(false, brBB);
+  returnDominated = dominatedByReturn(brBB);
+  if (!trueBrOnly && !falseBrOnly && returnDominated == -1) {
+    trueBrOnly = (exitFunctionTrueBr && !exitFunctionFalseBr) || exitLoopTrueBB;
+    falseBrOnly =
+        (exitFunctionFalseBr && !exitFunctionTrueBr) || exitLoopFalseBB;
+  }
+  // end of analysis
+
+  CBERegion *currRegion = targetRegion;
+  if (exitLoopFalseBB || exitLoopTrueBB) {
+    BasicBlock *exitBB = exitLoopFalseBB ? exitLoopFalseBB : exitLoopTrueBB;
+    currRegion->thenEdges.push_back(std::make_pair(brBB, exitBB));
+    currRegion->thenBBs.push_back(exitBB);
+    // if succBB of exitBB is returning, don't print break, print return block
+    for (auto ret = succ_begin(exitBB); ret != succ_end(exitBB); ++ret) {
+      BasicBlock *retBB = *ret;
+      if (retBB && !nodeBelongsToRegion(retBB, currRegion)) {
+        currRegion->thenEdges.push_back(std::make_pair(exitBB, retBB));
+        currRegion->thenBBs.push_back(retBB);
+      }
+    }
+
+    if (exitLoopFalseBB)
+      recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB,
+                                     currRegion, true);
+    else
+      recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB,
+                                     currRegion, true);
+
+    return;
   }
 
+  if (trueBrOnly && returnDominated == -1) {
+    recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB, currRegion);
+
+    BasicBlock *ret = isExitingFunction(trueStartBB);
+    if (ret && !nodeBelongsToRegion(ret, currRegion) && ret != trueStartBB) {
+      if (ret == trueStartBB)
+        currRegion->thenEdges.push_back(std::make_pair(brBB, ret));
+      else
+        currRegion->thenEdges.push_back(std::make_pair(trueStartBB, ret));
+
+      currRegion->thenBBs.push_back(ret);
+    }
+
+    // the other branch belongs to TopRegion if not belong to subregion
+    recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB, currRegion,
+                                   true);
+  }
+  // Case 3: only print if body with reveresed case
+  else if (falseBrOnly && returnDominated == -1) {
+    recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB, currRegion);
+
+    BasicBlock *ret = isExitingFunction(falseStartBB);
+    if (ret && !nodeBelongsToRegion(ret, currRegion) && ret != falseStartBB) {
+      if (ret == trueStartBB)
+        currRegion->thenEdges.push_back(std::make_pair(brBB, ret));
+      else
+        currRegion->thenEdges.push_back(std::make_pair(falseStartBB, ret));
+      currRegion->thenBBs.push_back(ret);
+    }
+
+    // the other branch belongs to TopRegion if not belong to subregion
+    recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB, currRegion,
+                                   true);
+  }
+  // Case 4: print if & else;
+  else {
+    recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB, currRegion);
+
+    BasicBlock *ret = isExitingFunction(trueStartBB);
+    if (ret &&
+        !nodeBelongsToRegion(ret, currRegion)) { // && ret != trueStartBB){
+      if (ret == falseStartBB)
+        currRegion->thenEdges.push_back(std::make_pair(brBB, ret));
+      else
+        currRegion->thenEdges.push_back(std::make_pair(trueStartBB, ret));
+      currRegion->thenBBs.push_back(ret);
+    }
+    recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB, currRegion,
+                                   true);
+
+    ret = isExitingFunction(falseStartBB);
+    if (ret && !nodeBelongsToRegion(ret, currRegion,
+                                    true)) { // && ret != falseStartBB){
+      if (ret == trueStartBB)
+        currRegion->elseEdges.push_back(std::make_pair(brBB, ret));
+      else
+        currRegion->elseEdges.push_back(std::make_pair(falseStartBB, ret));
+      currRegion->elseBBs.push_back(ret);
+    }
+  }
+
+  errs() << "=================SUSAN: END OF marking region : "
+         << br->getParent()->getName() << "==================\n";
 }
 
-CBERegion* CWriter::createNewRegion(BasicBlock* entryBB, CBERegion* parentR, bool isElseRegion){
-   //create a new region
-   CBERegion *newR = new CBERegion();
-   newR->parentRegion = parentR;
-   if(isElseRegion)
-    parentR->elseSubRegions.push_back(newR);
-   else
-     parentR->thenSubRegions.push_back(newR);
-   newR->entryBlock = entryBB;
-   recordedRegionBBs[newR] = entryBB;
-   return newR;
-}
-
-void CWriter::markBranchRegion(Instruction* br, CBERegion* targetRegion){
-    errs() << "=================SUSAN: START OF marking region : " << br->getParent()->getName() << "==================\n";
-    BasicBlock *currBB = br->getParent();
-
-    //analyse the branch properties
-    BasicBlock *exitingBB = currBB;
-    BasicBlock *exitLoopTrueBB = nullptr;
-    BasicBlock *exitLoopFalseBB = nullptr;
-    for(unsigned int i_succ = 0; i_succ<br->getNumSuccessors(); ++i_succ){
-      BasicBlock *exitBB = br->getSuccessor(i_succ);
-      for(auto edge : irregularLoopExits){
-        if(edge.first == exitingBB && edge.second == exitBB){
-          if(i_succ==0) exitLoopTrueBB = exitBB;
-          else if(i_succ==1) exitLoopFalseBB = exitBB;
-        }
-      }
-    }
-    BasicBlock *brBB = currBB;
-    BasicBlock *trueStartBB = br->getSuccessor(0);
-    BasicBlock *falseStartBB = br->getSuccessor(1);
-    bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
-    bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
-    bool trueBrOnly = noElseRegion(true, brBB);
-    bool falseBrOnly = noElseRegion(false, brBB);
-    returnDominated = dominatedByReturn(brBB);
-    if(!trueBrOnly && !falseBrOnly && returnDominated == -1){
-      trueBrOnly = (exitFunctionTrueBr && !exitFunctionFalseBr) || exitLoopTrueBB;
-      falseBrOnly = (exitFunctionFalseBr && !exitFunctionTrueBr) || exitLoopFalseBB;
-    }
-    // end of analysis
-
-
-
-
-    CBERegion *currRegion = targetRegion;
-    if(exitLoopFalseBB || exitLoopTrueBB){
-        BasicBlock *exitBB = exitLoopFalseBB? exitLoopFalseBB : exitLoopTrueBB;
-        currRegion->thenEdges.push_back(std::make_pair(brBB, exitBB));
-        currRegion->thenBBs.push_back(exitBB);
-        // if succBB of exitBB is returning, don't print break, print return block
-        for (auto ret = succ_begin(exitBB); ret != succ_end(exitBB); ++ret){
-	        BasicBlock *retBB = *ret;
-          if(retBB && !nodeBelongsToRegion(retBB, currRegion)){
-            currRegion->thenEdges.push_back(std::make_pair(exitBB, retBB));
-            currRegion->thenBBs.push_back(retBB);
-          }
-        }
-
-        if(exitLoopFalseBB)
-          recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB, currRegion, true);
-        else
-          recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB, currRegion, true);
-
-        return;
-    }
-
-    if(trueBrOnly && returnDominated == -1){
-        recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB,
-          currRegion);
-
-      BasicBlock *ret = isExitingFunction(trueStartBB);
-      if(ret && !nodeBelongsToRegion(ret, currRegion) && ret != trueStartBB){
-        if(ret == trueStartBB)
-          currRegion->thenEdges.push_back(std::make_pair(brBB, ret));
-        else
-          currRegion->thenEdges.push_back(std::make_pair(trueStartBB, ret));
-
-        currRegion->thenBBs.push_back(ret);
-      }
-
-      // the other branch belongs to TopRegion if not belong to subregion
-      recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB, currRegion, true);
-    }
-    //Case 3: only print if body with reveresed case
-    else if(falseBrOnly && returnDominated == -1){
-      recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB,
-            currRegion);
-
-      BasicBlock *ret = isExitingFunction(falseStartBB);
-      if(ret && !nodeBelongsToRegion(ret, currRegion) && ret != falseStartBB){
-        if(ret == trueStartBB)
-          currRegion->thenEdges.push_back(std::make_pair(brBB, ret));
-        else
-          currRegion->thenEdges.push_back(std::make_pair(falseStartBB, ret));
-        currRegion->thenBBs.push_back(ret);
-      }
-
-      // the other branch belongs to TopRegion if not belong to subregion
-      recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB, currRegion, true);
-    }
-    //Case 4: print if & else;
-    else{
-      recordTimes2bePrintedForBranch(trueStartBB, brBB, falseStartBB,
-            currRegion);
-
-      BasicBlock *ret = isExitingFunction(trueStartBB);
-      if(ret && !nodeBelongsToRegion(ret, currRegion)){// && ret != trueStartBB){
-        if(ret == falseStartBB)
-          currRegion->thenEdges.push_back(std::make_pair(brBB, ret));
-        else
-          currRegion->thenEdges.push_back(std::make_pair(trueStartBB, ret));
-        currRegion->thenBBs.push_back(ret);
-      }
-      recordTimes2bePrintedForBranch(falseStartBB, brBB, trueStartBB,
-            currRegion, true);
-
-      ret = isExitingFunction(falseStartBB);
-      if(ret && !nodeBelongsToRegion(ret, currRegion, true)){// && ret != falseStartBB){
-        if(ret == trueStartBB)
-          currRegion->elseEdges.push_back(std::make_pair(brBB, ret));
-        else
-          currRegion->elseEdges.push_back(std::make_pair(falseStartBB, ret));
-        currRegion->elseBBs.push_back(ret);
-      }
-   }
-
-  errs() << "=================SUSAN: END OF marking region : " << br->getParent()->getName() << "==================\n";
-}
-
-
-int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI){
-  if(Loop* L = LI->getLoopFor(entryBB)){
+int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI) {
+  if (Loop *L = LI->getLoopFor(entryBB)) {
     errs() << "CBackend: entryBB is a loop: " << entryBB->getName() << "\n";
 
-    if(L->getHeader() == entryBB)
+    if (L->getHeader() == entryBB)
       return 2;
     errs() << "but not a header!\n";
   }
 
-  if(BranchInst *br = dyn_cast<BranchInst>(entryBB->getTerminator()))
-    if(br->isConditional())
+  if (BranchInst *br = dyn_cast<BranchInst>(entryBB->getTerminator()))
+    if (br->isConditional())
       return 1;
 
   return 0;
 }
 
+void CWriter::markBBwithNumOfVisits(Function &F) {
 
-
-
-void CWriter::markBBwithNumOfVisits(Function &F){
-
-  //set up top region
+  // set up top region
   topRegion = new CBERegion();
   topRegion->entryBlock = nullptr;
   topRegion->parentRegion = nullptr;
-  for(auto &BB : F){
-   // topRegion.thenBBs.push_back(&BB);
-    times2bePrinted[&BB]=0;
+  for (auto &BB : F) {
+    // topRegion.thenBBs.push_back(&BB);
+    times2bePrinted[&BB] = 0;
   }
 
   returnDominated = -1;
-  recordTimes2bePrintedForBranch(&F.getEntryBlock(), nullptr, nullptr, topRegion);
+  recordTimes2bePrintedForBranch(&F.getEntryBlock(), nullptr, nullptr,
+                                 topRegion);
 
-  //despite root node, each leaf-to-child_of_root path will contain a set of BBs, these BBs times3bePrinted need to be incrememnted, lastly any node with times2bePrinted = 0 means it belong to the entry node and therefore times2bePrinted = 1
-  std::vector<CBERegion*> regionPath;
+  // despite root node, each leaf-to-child_of_root path will contain a set of
+  // BBs, these BBs times3bePrinted need to be incrememnted, lastly any node
+  // with times2bePrinted = 0 means it belong to the entry node and therefore
+  // times2bePrinted = 1
+  std::vector<CBERegion *> regionPath;
   CountTimes2bePrintedByRegionPath();
 
-  //view the tree:
-  //record times2bePrinted
-  //record RegionMap
-  std::queue<CBERegion*> toVisit;
+  // view the tree:
+  // record times2bePrinted
+  // record RegionMap
+  std::queue<CBERegion *> toVisit;
   toVisit.push(topRegion);
-  while(!toVisit.empty()){
+  while (!toVisit.empty()) {
     CBERegion *currNode = toVisit.front();
     toVisit.pop();
-    if(currNode->entryBlock)
+    if (currNode->entryBlock)
       errs() << "SUSAN: Node " << (currNode->entryBlock->getName()) << "\n";
     else
       errs() << "SUSAN: Node: topRegion\n";
 
     errs() << "then SubNodes: \n";
-    for(auto subNode : currNode->thenSubRegions){
+    for (auto subNode : currNode->thenSubRegions) {
       errs() << (subNode->entryBlock->getName()) << "\n";
     }
 
     errs() << "else SubNodes: \n";
-    for(auto subNode : currNode->elseSubRegions){
+    for (auto subNode : currNode->elseSubRegions) {
       errs() << (subNode->entryBlock->getName()) << "\n";
     }
 
     errs() << "current region then bbs:\n";
-    for(auto BB : currNode->thenBBs){
+    for (auto BB : currNode->thenBBs) {
       errs() << BB->getName() << "\n";
     }
 
     errs() << "current region else bbs:\n";
-    for(auto BB : currNode->elseBBs){
+    for (auto BB : currNode->elseBBs) {
       errs() << BB->getName() << "\n";
     }
 
     errs() << "current region then edges:\n";
-    for(auto edge : currNode->thenEdges){
+    for (auto edge : currNode->thenEdges) {
       BasicBlock *from = edge.first;
       BasicBlock *to = edge.second;
-      if(from && to)
+      if (from && to)
         errs() << from->getName() << " -> " << to->getName() << "\n";
     }
 
     errs() << "current region else edges:\n";
-    for(auto edge : currNode->elseEdges){
+    for (auto edge : currNode->elseEdges) {
       BasicBlock *from = edge.first;
       BasicBlock *to = edge.second;
-      if(from && to)
+      if (from && to)
         errs() << from->getName() << " -> " << to->getName() << "\n";
     }
 
     CBERegionMap[currNode->entryBlock] = currNode;
-    for(CBERegion *subRegion : currNode->thenSubRegions){
+    for (CBERegion *subRegion : currNode->thenSubRegions) {
       toVisit.push(subRegion);
     }
-    for(CBERegion *subRegion : currNode->elseSubRegions){
+    for (CBERegion *subRegion : currNode->elseSubRegions) {
       toVisit.push(subRegion);
     }
   }
 
-
-  for(auto &BB : F){
-    if(!times2bePrinted[&BB]){
-      std::vector<BasicBlock*> preds(pred_begin(&BB), pred_end(&BB));
+  for (auto &BB : F) {
+    if (!times2bePrinted[&BB]) {
+      std::vector<BasicBlock *> preds(pred_begin(&BB), pred_end(&BB));
       times2bePrinted[&BB] = preds.size() ? preds.size() : 1;
     }
-    //if(isa<ReturnInst>(BB.getTerminator())){
-    //  std::vector<BasicBlock*> preds(pred_begin(&BB), pred_end(&BB));
-    //  times2bePrinted[&BB] = preds.size() ? preds.size() : 1;
-    //}
-    errs() << "SUSAN: BB " << BB.getName() << " times2bePrinted: " << times2bePrinted[&BB] << "\n";
+    // if(isa<ReturnInst>(BB.getTerminator())){
+    //   std::vector<BasicBlock*> preds(pred_begin(&BB), pred_end(&BB));
+    //   times2bePrinted[&BB] = preds.size() ? preds.size() : 1;
+    // }
+    errs() << "SUSAN: BB " << BB.getName()
+           << " times2bePrinted: " << times2bePrinted[&BB] << "\n";
   }
 }
 
-void collectNoneArrayGEPsDownStream(GetElementPtrInst *gepInst, std::set<GetElementPtrInst*> &NoneArrayGEPs){
+void collectNoneArrayGEPsDownStream(
+    GetElementPtrInst *gepInst, std::set<GetElementPtrInst *> &NoneArrayGEPs) {
   // collect StructGeps DownStream
   GetElementPtrInst *gep = gepInst;
   Value *opnd = gep->getPointerOperand();
-  while(GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(opnd)){
+  while (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(opnd)) {
     NoneArrayGEPs.insert(gep);
     opnd = gep->getPointerOperand();
   }
 }
 
-void CheckAndAddArrayGep2NoneArrayGEPs(GetElementPtrInst *gepInst, std::set<GetElementPtrInst*> &NoneArrayGEPs){
+void CheckAndAddArrayGep2NoneArrayGEPs(
+    GetElementPtrInst *gepInst, std::set<GetElementPtrInst *> &NoneArrayGEPs) {
   GetElementPtrInst *gep = gepInst;
   Value *opnd = gep->getPointerOperand();
-  while(GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(opnd)){
+  while (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(opnd)) {
     NoneArrayGEPs.insert(gep);
-    if(NoneArrayGEPs.find(gep) != NoneArrayGEPs.end()){
+    if (NoneArrayGEPs.find(gep) != NoneArrayGEPs.end()) {
       NoneArrayGEPs.insert(gepInst);
       break;
     }
   }
 }
 
+void CWriter::findVariableDepth(Type *Ty, Value *UO, int depths) {
+  if (++depths > 20)
+    return;
 
-void CWriter::findVariableDepth(Type *Ty, Value *UO, int depths){
-  if(++depths > 20) return;
-
-  if(Times2Dereference.find(UO) == Times2Dereference.end())
+  if (Times2Dereference.find(UO) == Times2Dereference.end())
     Times2Dereference[UO] = 0;
   else
     Times2Dereference[UO]++;
 
-  if(isa<IntegerType>(Ty) || Ty->isFloatTy() || Ty->isDoubleTy())
-      return;
+  if (isa<IntegerType>(Ty) || Ty->isFloatTy() || Ty->isDoubleTy())
+    return;
 
-  if(PointerType *ptrTy = dyn_cast<PointerType>(Ty)){
+  if (PointerType *ptrTy = dyn_cast<PointerType>(Ty)) {
     Type *nextTy = ptrTy->getPointerElementType();
     findVariableDepth(nextTy, UO, depths);
-  }
-  else if(ArrayType *arrTy = dyn_cast<ArrayType>(Ty)){
+  } else if (ArrayType *arrTy = dyn_cast<ArrayType>(Ty)) {
     Type *nextTy = arrTy->getArrayElementType();
     findVariableDepth(nextTy, UO, depths);
-  }
-  else if(StructType *strucTy = dyn_cast<StructType>(Ty)){
+  } else if (StructType *strucTy = dyn_cast<StructType>(Ty)) {
     for (StructType::element_iterator I = strucTy->element_begin(),
-                              E = strucTy->element_end(); I != E; ++I) {
+                                      E = strucTy->element_end();
+         I != E; ++I) {
       Type *nextTy = *I;
-      if(nextTy == Ty)//recursive case
+      if (nextTy == Ty) // recursive case
         Times2Dereference[UO] = 20;
-      else if(PointerType *ptrTy = dyn_cast<PointerType>(nextTy)){
-        if(ptrTy->getPointerElementType() == Ty) // recursive case
+      else if (PointerType *ptrTy = dyn_cast<PointerType>(nextTy)) {
+        if (ptrTy->getPointerElementType() == Ty) // recursive case
           Times2Dereference[UO] = 20;
-      }
-      else if(isa<PointerType>(nextTy) || isa<ArrayType>(nextTy) || isa<StructType>(nextTy))
+      } else if (isa<PointerType>(nextTy) || isa<ArrayType>(nextTy) ||
+                 isa<StructType>(nextTy))
         findVariableDepth(nextTy, UO, depths);
     }
   }
 }
 
-void CWriter::collectVariables2Deref(Function &F){
+void CWriter::collectVariables2Deref(Function &F) {
   // SUSAN: build the table of local variable : times to be dereferenced
   // GEP might not be directly connected to a site
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
@@ -706,64 +727,65 @@ void CWriter::collectVariables2Deref(Function &F){
     findVariableDepth(instTy, cast<Value>(&*I), 0);
   }
 
-
   static bool collected = false;
-  //add global variables to dereftable
-  //FIXME: only need to do it once...
+  // add global variables to dereftable
+  // FIXME: only need to do it once...
   //
 
-  if(!collected){
-     Module *M = F.getParent();
-     for (Module::global_iterator I = M->global_begin(), E = M->global_end();
-           I != E; ++I) {
-         GlobalVariable* glob = &*I;
-         if(glob->hasInitializer()){
-           Constant *globVal = glob->getInitializer();
-           Type *globTy = globVal->getType();
-           if(isa<ArrayType>(globTy) || isa<StructType>(globTy) || isa<PointerType>(globTy)){
-             errs() << "global: " << *glob << "\n";
-             errs() << "type: " << *globTy << "\n";
-             findVariableDepth(globTy, cast<Value>(glob), 0);
-           }
-         }
-     }
+  if (!collected) {
+    Module *M = F.getParent();
+    for (Module::global_iterator I = M->global_begin(), E = M->global_end();
+         I != E; ++I) {
+      GlobalVariable *glob = &*I;
+      if (glob->hasInitializer()) {
+        Constant *globVal = glob->getInitializer();
+        Type *globTy = globVal->getType();
+        if (isa<ArrayType>(globTy) || isa<StructType>(globTy) ||
+            isa<PointerType>(globTy)) {
+          errs() << "global: " << *glob << "\n";
+          errs() << "type: " << *globTy << "\n";
+          findVariableDepth(globTy, cast<Value>(glob), 0);
+        }
+      }
+    }
   }
 
   collected = true;
 
-
-  //collect phi nodes that might be pointers/array/structs
+  // collect phi nodes that might be pointers/array/structs
 }
 
-void CWriter::collectLateDeclares(Function &F){
-  std::list<Loop*> loops( LI->begin(), LI->end() );
-  for(auto L : loops){
+void CWriter::collectLateDeclares(Function &F) {
+  std::list<Loop *> loops(LI->begin(), LI->end());
+  for (auto L : loops) {
     Instruction *term = L->getHeader()->getTerminator();
-    //if(!term->getMetadata("splendid.doall.loop")) continue;
+    // if(!term->getMetadata("splendid.doall.loop")) continue;
     for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
       BasicBlock *BB = L->getBlocks()[i];
-      for(auto &I : *BB){
-        //if (isInductionVariable(&I) || isExtraInductionVariable(&I) || isIVIncrement(&I)) continue;
-        //if (isIVIncrement(&I)) continue;
-        if(isSkipableInst(&I))continue;
-        if(isDirectAlloca(&I))continue;
+      for (auto &I : *BB) {
+        // if (isInductionVariable(&I) || isExtraInductionVariable(&I) ||
+        // isIVIncrement(&I)) continue; if (isIVIncrement(&I)) continue;
+        if (isSkipableInst(&I))
+          continue;
+        if (isDirectAlloca(&I))
+          continue;
         toDeclareLocals.insert(&I);
       }
     }
   }
 }
 
-void CWriter::collectNoneArrayGEPs(Function &F){
+void CWriter::collectNoneArrayGEPs(Function &F) {
 
-  std::set<GetElementPtrInst*>arrayGeps;
-  // collect array geps, then the rest goes into struct geps, anything in the downstream of struct geps also goes to struct geps
-  for(auto &BB : F){
-    for(auto &I : BB){
-      if(GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(&I)){
-        if(isa<ArrayType>(gepInst->getSourceElementType())){
+  std::set<GetElementPtrInst *> arrayGeps;
+  // collect array geps, then the rest goes into struct geps, anything in the
+  // downstream of struct geps also goes to struct geps
+  for (auto &BB : F) {
+    for (auto &I : BB) {
+      if (GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(&I)) {
+        if (isa<ArrayType>(gepInst->getSourceElementType())) {
           arrayGeps.insert(gepInst);
-        }
-        else{
+        } else {
           NoneArrayGEPs.insert(gepInst);
           collectNoneArrayGEPsDownStream(gepInst, NoneArrayGEPs);
         }
@@ -771,76 +793,73 @@ void CWriter::collectNoneArrayGEPs(Function &F){
     }
   }
 
-  //collect array geps into none array geps if array geps has struct geps down stream
-  for(auto gep : arrayGeps){
+  // collect array geps into none array geps if array geps has struct geps down
+  // stream
+  for (auto gep : arrayGeps) {
     CheckAndAddArrayGep2NoneArrayGEPs(gep, NoneArrayGEPs);
     collectNoneArrayGEPsDownStream(gep, NoneArrayGEPs);
   }
-
-
 }
 
-void CWriter::markBackEdges(Function &F){
-  std::set<BasicBlock*> visited;
-  std::queue<BasicBlock*> toVisit;
+void CWriter::markBackEdges(Function &F) {
+  std::set<BasicBlock *> visited;
+  std::queue<BasicBlock *> toVisit;
   visited.insert(&F.getEntryBlock());
   toVisit.push(&F.getEntryBlock());
 
-  while(!toVisit.empty()){
-    BasicBlock* currBB = toVisit.front();
+  while (!toVisit.empty()) {
+    BasicBlock *currBB = toVisit.front();
     toVisit.pop();
 
-
-    for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ){
+    for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ) {
       BasicBlock *succBB = *succ;
-      if(DT->dominates(succBB, currBB)){
+      if (DT->dominates(succBB, currBB)) {
         backEdges.insert(std::make_pair(currBB, succBB));
       }
 
-      if(visited.find(succBB) == visited.end()){
+      if (visited.find(succBB) == visited.end()) {
         visited.insert(succBB);
         toVisit.push(succBB);
       }
     }
   }
-
 }
 
-std::set<BasicBlock*> CWriter::findRegionEntriesOfBB (BasicBlock* BB){
-   std::set<BasicBlock*> entries;
-   std::queue<CBERegion*> toVisit;
-   toVisit.push(topRegion);
+std::set<BasicBlock *> CWriter::findRegionEntriesOfBB(BasicBlock *BB) {
+  std::set<BasicBlock *> entries;
+  std::queue<CBERegion *> toVisit;
+  toVisit.push(topRegion);
 
-   while(!toVisit.empty()){
-     CBERegion *currNode = toVisit.front();
-     toVisit.pop();
+  while (!toVisit.empty()) {
+    CBERegion *currNode = toVisit.front();
+    toVisit.pop();
 
-     for(auto regionBB : currNode->thenBBs)
-       if(regionBB == BB && currNode->entryBlock)
-         entries.insert(currNode->entryBlock);
+    for (auto regionBB : currNode->thenBBs)
+      if (regionBB == BB && currNode->entryBlock)
+        entries.insert(currNode->entryBlock);
 
-     for(auto regionBB : currNode->elseBBs)
-       if(regionBB == BB && currNode->entryBlock)
-         entries.insert(currNode->entryBlock);
+    for (auto regionBB : currNode->elseBBs)
+      if (regionBB == BB && currNode->entryBlock)
+        entries.insert(currNode->entryBlock);
 
-     for(CBERegion *subRegion : currNode->thenSubRegions){
-       toVisit.push(subRegion);
-     }
-     for(CBERegion *subRegion : currNode->elseSubRegions){
-       toVisit.push(subRegion);
-     }
-   }
+    for (CBERegion *subRegion : currNode->thenSubRegions) {
+      toVisit.push(subRegion);
+    }
+    for (CBERegion *subRegion : currNode->elseSubRegions) {
+      toVisit.push(subRegion);
+    }
+  }
 
-   return entries;
+  return entries;
 }
 
-void CWriter::determineControlFlowTranslationMethod(Function &F){
+void CWriter::determineControlFlowTranslationMethod(Function &F) {
   NATURAL_CONTROL_FLOW = true;
-  //markBBwithNumOfVisits(F);
+  // markBBwithNumOfVisits(F);
 
   BasicBlock *returnBB = nullptr;
-  for(auto &BB : F)
-    if(isa<ReturnInst>(BB.getTerminator())){
+  for (auto &BB : F)
+    if (isa<ReturnInst>(BB.getTerminator())) {
       returnBB = &BB;
       break;
     }
@@ -850,24 +869,25 @@ void CWriter::determineControlFlowTranslationMethod(Function &F){
   TopRegion->createCBERegionDAG(&F.getEntryBlock(), nullptr, returnBB);
 }
 
-Instruction *CWriter::getIVIncrement(Loop *L, PHINode* IV) {
-  if(!IV) return nullptr;
-  for(unsigned i=0; i<IV->getNumIncomingValues(); ++i){
+Instruction *CWriter::getIVIncrement(Loop *L, PHINode *IV) {
+  if (!IV)
+    return nullptr;
+  for (unsigned i = 0; i < IV->getNumIncomingValues(); ++i) {
     BasicBlock *predBB = IV->getIncomingBlock(i);
-    if(LI->getLoopFor(predBB) == L)
+    if (LI->getLoopFor(predBB) == L)
       return dyn_cast<Instruction>(IV->getIncomingValue(i));
   }
   return nullptr;
 }
 
-PHINode* CWriter::getInductionVariable(Loop *L) {
-  //errs() << "trying to get IV for Loop:" << *L << "\n";
+PHINode *CWriter::getInductionVariable(Loop *L) {
+  // errs() << "trying to get IV for Loop:" << *L << "\n";
   PHINode *InnerIndexVar = L->getCanonicalInductionVariable();
-  if (InnerIndexVar){
+  if (InnerIndexVar) {
     errs() << "SUSAN: found IV 784" << *InnerIndexVar << "\n";
     return InnerIndexVar;
   }
-  if (L->getLoopLatch() == nullptr || L->getLoopPredecessor() == nullptr){
+  if (L->getLoopLatch() == nullptr || L->getLoopPredecessor() == nullptr) {
     errs() << "SUSAN: didn't find IV 788\n";
     return nullptr;
   }
@@ -876,23 +896,23 @@ PHINode* CWriter::getInductionVariable(Loop *L) {
     errs() << "SUSAN: phi: " << *PhiVar << "\n";
     Type *PhiTy = PhiVar->getType();
     if (!PhiTy->isIntegerTy() && !PhiTy->isFloatingPointTy() &&
-        !PhiTy->isPointerTy()){
+        !PhiTy->isPointerTy()) {
       errs() << "SUSAN: didn't find IV 796\n";
       return nullptr;
     }
 
     const SCEVAddRecExpr *AddRec = nullptr;
-    if(SE->isSCEVable(PhiVar->getType()))
-        AddRec = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(PhiVar));
-    if (!AddRec || !AddRec->isAffine()){
+    if (SE->isSCEVable(PhiVar->getType()))
+      AddRec = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(PhiVar));
+    if (!AddRec || !AddRec->isAffine()) {
       errs() << "SUSAN: can't find addRec\n";
       continue;
     }
-    //const SCEV *Step = AddRec->getStepRecurrence(*SE);
-    //if (!isa<SCEVConstant>(Step) || !isa<SCEVSequentialMinMaxExpr>(Step)){
-    //  errs() << "SUSAN: step isn't constant\n";
-    //  continue;
-    //}
+    // const SCEV *Step = AddRec->getStepRecurrence(*SE);
+    // if (!isa<SCEVConstant>(Step) || !isa<SCEVSequentialMinMaxExpr>(Step)){
+    //   errs() << "SUSAN: step isn't constant\n";
+    //   continue;
+    // }
 
     // Found the induction variable.
     // FIXME: Handle loops with more than one induction variable. Note that,
@@ -904,7 +924,7 @@ PHINode* CWriter::getInductionVariable(Loop *L) {
   return nullptr;
 }
 
-void CWriter::CreateOmpLoops(Loop *L, Value* ub, Value *lb, Value *incr){
+void CWriter::CreateOmpLoops(Loop *L, Value *ub, Value *lb, Value *incr) {
   LoopProfile *ompLI = new LoopProfile();
   ompLI->L = L;
   ompLI->ub = ub;
@@ -917,28 +937,29 @@ void CWriter::CreateOmpLoops(Loop *L, Value* ub, Value *lb, Value *incr){
   LoopProfiles.insert(ompLI);
 }
 
-Loop* CWriter::findLoopAccordingTo(Function &F, Value *bound){
+Loop *CWriter::findLoopAccordingTo(Function &F, Value *bound) {
   Instruction *boundI = dyn_cast<Instruction>(bound);
-  if(!boundI){
+  if (!boundI) {
     return nullptr;
   }
 
-  std::queue<Instruction*> toVisit;
-  std::set<Instruction*> visited;
+  std::queue<Instruction *> toVisit;
+  std::set<Instruction *> visited;
   toVisit.push(boundI);
   visited.insert(boundI);
-  while(!toVisit.empty()){
+  while (!toVisit.empty()) {
     Instruction *currInst = toVisit.front();
     toVisit.pop();
 
-    if(isa<CmpInst>(currInst)){
+    if (isa<CmpInst>(currInst)) {
       Loop *L = LI->getLoopFor(currInst->getParent());
-      if(L) return L;
+      if (L)
+        return L;
     }
 
-    for(User *U : currInst->users()){
-      if(Instruction *inst = dyn_cast<Instruction>(U)){
-        if(visited.find(inst) == visited.end()){
+    for (User *U : currInst->users()) {
+      if (Instruction *inst = dyn_cast<Instruction>(U)) {
+        if (visited.find(inst) == visited.end()) {
           visited.insert(inst);
           toVisit.push(inst);
         }
@@ -949,52 +970,57 @@ Loop* CWriter::findLoopAccordingTo(Function &F, Value *bound){
   return nullptr;
 }
 
-void CWriter::preprossesPHIs2Print(Function &F){
-  std::map<PHINode*, PHINode*> phiLoops;
+void CWriter::preprossesPHIs2Print(Function &F) {
+  std::map<PHINode *, PHINode *> phiLoops;
 
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I)
-    if(PHINode *phi = dyn_cast<PHINode>(&*I)){
+    if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
 
       Value *ldPtr = nullptr;
       Value *stPtr = nullptr;
       LoadInst *ldInst = nullptr;
       StoreInst *stInst = nullptr;
 
-      if(isInductionVariable(phi)) continue;
-      if(isExtraInductionVariable(phi)) continue;
-      for(unsigned i=0; i<phi->getNumIncomingValues(); ++i){
+      if (isInductionVariable(phi))
+        continue;
+      if (isExtraInductionVariable(phi))
+        continue;
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         BasicBlock *predBB = phi->getIncomingBlock(i);
         Value *phiVal = phi->getIncomingValue(i);
-        if(isa<Constant>(phiVal) || isa<LoadInst>(phiVal)){
+        if (isa<Constant>(phiVal) || isa<LoadInst>(phiVal)) {
           bool skipStderr = false;
-          if(LoadInst* ld = dyn_cast<LoadInst>(phiVal))
-            if(ld->getPointerOperand()->getName() == "stderr"){
+          if (LoadInst *ld = dyn_cast<LoadInst>(phiVal))
+            if (ld->getPointerOperand()->getName() == "stderr") {
               skipStderr = true;
               IRNaming.insert(std::make_pair(ld, "stderr"));
             }
-          if(!skipStderr) {
+          if (!skipStderr) {
             PHIValues2Print.insert(std::make_pair(predBB, phi));
           }
         }
 
-        if(PHINode *incomingPhi = dyn_cast<PHINode>(phiVal)){
-          //detect a circle
-          for(unsigned i=0; i<incomingPhi->getNumIncomingValues(); ++i)
-            if(incomingPhi->getIncomingValue(i) == phi){
+        if (PHINode *incomingPhi = dyn_cast<PHINode>(phiVal)) {
+          // detect a circle
+          for (unsigned i = 0; i < incomingPhi->getNumIncomingValues(); ++i)
+            if (incomingPhi->getIncomingValue(i) == phi) {
               phiLoops[incomingPhi] = phi;
               break;
             }
         }
 
         PHINode *replaceVal = phi;
-        if(phiLoops.find(phi) != phiLoops.end()){
-          if(phiLoops[phi] == phiVal) continue;
+        if (phiLoops.find(phi) != phiLoops.end()) {
+          if (phiLoops[phi] == phiVal)
+            continue;
           replaceVal = phiLoops[phi];
         }
 
-        if(Instruction *incomingInst = dyn_cast<Instruction>(phiVal)){
-          if(deleteAndReplaceInsts.find(incomingInst) != deleteAndReplaceInsts.end())
-            InstsToReplaceByPhi[deleteAndReplaceInsts[incomingInst]] = replaceVal;
+        if (Instruction *incomingInst = dyn_cast<Instruction>(phiVal)) {
+          if (deleteAndReplaceInsts.find(incomingInst) !=
+              deleteAndReplaceInsts.end())
+            InstsToReplaceByPhi[deleteAndReplaceInsts[incomingInst]] =
+                replaceVal;
           else
             InstsToReplaceByPhi[phiVal] = replaceVal;
         }
@@ -1002,45 +1028,51 @@ void CWriter::preprossesPHIs2Print(Function &F){
     }
 }
 
-Value* CWriter::findOriginalUb(Function &F, Value *ub, CallInst *initCI, CallInst *prevFini, int &offset){
+Value *CWriter::findOriginalUb(Function &F, Value *ub, CallInst *initCI,
+                               CallInst *prevFini, int &offset) {
   bool startSearching = prevFini ? false : true;
-  for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I){
-    if(&*I == initCI) break;
-    if(&*I == prevFini) startSearching = true;
-    if(!startSearching) continue;
+  for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+    if (&*I == initCI)
+      break;
+    if (&*I == prevFini)
+      startSearching = true;
+    if (!startSearching)
+      continue;
 
-    if(StoreInst *store = dyn_cast<StoreInst>(&*I))
-      if(store->getOperand(1) == ub){
-        BinaryOperator *subInst = dyn_cast<BinaryOperator>(store->getOperand(0));
-        if(subInst && (subInst->getOpcode() == Instruction::Add || subInst->getOpcode() == Instruction::FAdd)){
-          if(ConstantInt *OffSetMinusOne = dyn_cast<ConstantInt>(subInst->getOperand(1))){
-            //if(minusOne->getSExtValue() == -1){
+    if (StoreInst *store = dyn_cast<StoreInst>(&*I))
+      if (store->getOperand(1) == ub) {
+        BinaryOperator *subInst =
+            dyn_cast<BinaryOperator>(store->getOperand(0));
+        if (subInst && (subInst->getOpcode() == Instruction::Add ||
+                        subInst->getOpcode() == Instruction::FAdd)) {
+          if (ConstantInt *OffSetMinusOne =
+                  dyn_cast<ConstantInt>(subInst->getOperand(1))) {
+            // if(minusOne->getSExtValue() == -1){
             Value *opnd0 = subInst->getOperand(0);
-            offset = OffSetMinusOne->getSExtValue()+1;
-            //if(LoadInst* ld = dyn_cast<LoadInst>(opnd0)) return ld->getPointerOperand();
-            //else return opnd0;
+            offset = OffSetMinusOne->getSExtValue() + 1;
+            // if(LoadInst* ld = dyn_cast<LoadInst>(opnd0)) return
+            // ld->getPointerOperand(); else return opnd0;
             return opnd0;
             //}
           }
         }
 
         Argument *arg = dyn_cast<Argument>(store->getOperand(0));
-        if(arg){
+        if (arg) {
           UpperBoundArgs.insert(arg);
           return arg;
         }
       }
   }
-  //errs() << "SUSAN: ub: " << *ub << "\n";
+  // errs() << "SUSAN: ub: " << *ub << "\n";
   return ub;
 }
 
-void CWriter::omp_preprossesing(Function &F){
+void CWriter::omp_preprossesing(Function &F) {
 
-  //FIXME: currently only searching for the loop to be processed
+  // FIXME: currently only searching for the loop to be processed
 
-
-  //find __kmpc_for_static_init and associated loop info
+  // find __kmpc_for_static_init and associated loop info
   Value *lb, *ub, *incr;
   int schedtype, chunksize;
   CallInst *initCI, *finiCI;
@@ -1051,66 +1083,70 @@ void CWriter::omp_preprossesing(Function &F){
   incr = nullptr;
   LoopProfile *currLP = nullptr;
   int countBarrier = 0;
-  for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I){
-    if(CallInst* CI = dyn_cast<CallInst>(&*I)){
-      if(Function *ompCall = CI->getCalledFunction()){
+  for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+    if (CallInst *CI = dyn_cast<CallInst>(&*I)) {
+      if (Function *ompCall = CI->getCalledFunction()) {
 
         /*
          * OpenMP: translate omp parallel for schedule (static)
          */
-        if(ompCall->getName().contains("__kmpc_for_static_init")){
+        if (ompCall->getName().contains("__kmpc_for_static_init")) {
           LoopProfile *ompLP = new LoopProfile();
           initCI = CI;
           omp_SkipVals.insert(cast<Value>(CI));
 
-
           // find the value stored into lb
           lb = CI->getArgOperand(4);
-          if(schedtype == 33 || schedtype == 34){
+          if (schedtype == 33 || schedtype == 34) {
             errs() << "SUSAN: schedtype is static!\n";
           }
           ompLP->lbAlloca = lb;
-          ompLP->schedtype = cast<ConstantInt>(CI->getArgOperand(2))->getSExtValue();
-          ompLP->chunksize = cast<ConstantInt>(CI->getArgOperand(8))->getSExtValue();
+          ompLP->schedtype =
+              cast<ConstantInt>(CI->getArgOperand(2))->getSExtValue();
+          ompLP->chunksize =
+              cast<ConstantInt>(CI->getArgOperand(8))->getSExtValue();
           errs() << "SUSAN: lbAlloca: " << *lb << "\n";
-          for(User *U : lb->users()){
-            if(StoreInst *store = dyn_cast<StoreInst>(U))
+          for (User *U : lb->users()) {
+            if (StoreInst *store = dyn_cast<StoreInst>(U))
               lb = store->getOperand(0);
           }
           ompLP->lb = lb;
 
-          //find ub & incr
+          // find ub & incr
           int ubOffset = 0;
-          ompLP->ub = findOriginalUb(F, CI->getArgOperand(5), initCI, finiCI, ubOffset);
+          ompLP->ub =
+              findOriginalUb(F, CI->getArgOperand(5), initCI, finiCI, ubOffset);
           errs() << "SUSAN: original ub: " << *(ompLP->ub) << "\n";
           ompLP->ubOffset = ubOffset;
           ompLP->incr = CI->getArgOperand(7);
           currLP = ompLP;
-        }
-        else if(ompCall->getName().contains("__kmpc_for_static_fini")){
+        } else if (ompCall->getName().contains("__kmpc_for_static_fini")) {
           finiCI = CI;
           Loop *ompLoop = nullptr;
-          //find loop in between init and fini
-          for(auto &BB : F){
-            if(DT->dominates(initCI->getParent(), &BB)
-                && PDT->dominates(finiCI->getParent(), &BB)){
+          // find loop in between init and fini
+          for (auto &BB : F) {
+            if (DT->dominates(initCI->getParent(), &BB) &&
+                PDT->dominates(finiCI->getParent(), &BB)) {
               Loop *dominatedLoop = LI->getLoopFor(&BB);
-               if(!dominatedLoop) continue;
+              if (!dominatedLoop)
+                continue;
 
-               bool loopIsDominated = true;
-               for (unsigned i = 0, e = dominatedLoop->getBlocks().size(); i != e; ++i) {
-                 BasicBlock *domBB = dominatedLoop->getBlocks()[i];
-                 if(!DT->dominates(initCI->getParent(), domBB)
-                     || !PDT->dominates(finiCI->getParent(), domBB)){
-                   loopIsDominated = false;
-                   break;
-                 }
-               }
+              bool loopIsDominated = true;
+              for (unsigned i = 0, e = dominatedLoop->getBlocks().size();
+                   i != e; ++i) {
+                BasicBlock *domBB = dominatedLoop->getBlocks()[i];
+                if (!DT->dominates(initCI->getParent(), domBB) ||
+                    !PDT->dominates(finiCI->getParent(), domBB)) {
+                  loopIsDominated = false;
+                  break;
+                }
+              }
 
-               if(!loopIsDominated) continue;
+              if (!loopIsDominated)
+                continue;
 
-               ompLoop = dominatedLoop;
-               break;
+              ompLoop = dominatedLoop;
+              break;
             }
           }
           assert(ompLoop && "didn't find omp loop?\n");
@@ -1126,84 +1162,84 @@ void CWriter::omp_preprossesing(Function &F){
           LoopProfiles.insert(currLP);
         }
 
-
         /*
          * OpenMP: search for barrier call
          */
-        if(ompCall->getName().contains("__kmpc_barrier")){
+        if (ompCall->getName().contains("__kmpc_barrier")) {
           errs() << "SUSAN: barrier call!!\n";
           countBarrier++;
-          if(countBarrier>1)
+          if (countBarrier > 1)
             currLP->barrier = true;
         }
       }
     }
   }
 
-
-  //CreateOmpLoops(ompLoop, ub, lb, incr);
-  //omp_searchForUsesToDelete(values2delete, F);
+  // CreateOmpLoops(ompLoop, ub, lb, incr);
+  // omp_searchForUsesToDelete(values2delete, F);
 }
 
-Value* CWriter::findOriginalValue(Value *val){
+Value *CWriter::findOriginalValue(Value *val) {
   Instruction *valInst = dyn_cast<Instruction>(val);
-  if(!valInst) return val;
+  if (!valInst)
+    return val;
 
   Value *newVal = val;
 
-  if(isa<AllocaInst>(val))
-    for(auto user : val->users())
-      if(StoreInst *store = dyn_cast<StoreInst>(user))
-        if(store->getPointerOperand() == val)
+  if (isa<AllocaInst>(val))
+    for (auto user : val->users())
+      if (StoreInst *store = dyn_cast<StoreInst>(user))
+        if (store->getPointerOperand() == val)
           newVal = store->getOperand(0);
 
-  while(isa<CastInst>(newVal) || isa<LoadInst>(newVal) ||
-      (isa<PHINode>(newVal) && !isInductionVariable(newVal) && !isExtraInductionVariable(newVal))){
+  while (isa<CastInst>(newVal) || isa<LoadInst>(newVal) ||
+         (isa<PHINode>(newVal) && !isInductionVariable(newVal) &&
+          !isExtraInductionVariable(newVal))) {
     Instruction *currInst = cast<Instruction>(newVal);
-    if(isa<CastInst>(newVal) || isa<LoadInst>(newVal))
+    if (isa<CastInst>(newVal) || isa<LoadInst>(newVal))
       newVal = currInst->getOperand(0);
-    else if(isa<PHINode>(newVal)){
+    else if (isa<PHINode>(newVal)) {
       PHINode *phi = dyn_cast<PHINode>(currInst);
-      for(unsigned i=0; i<phi->getNumIncomingValues(); ++i)
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
         newVal = phi->getIncomingValue(i);
     }
- }
+  }
 
   valInst = dyn_cast<Instruction>(newVal);
-  if(!valInst) return newVal;
+  if (!valInst)
+    return newVal;
 
-  if(deleteAndReplaceInsts.find(valInst) != deleteAndReplaceInsts.end())
+  if (deleteAndReplaceInsts.find(valInst) != deleteAndReplaceInsts.end())
     newVal = deleteAndReplaceInsts[valInst];
   return newVal;
 }
 
-void CWriter::preprocessLoopProfiles(Function &F){
-  std::list<Loop*> loops( LI->begin(), LI->end() );
+void CWriter::preprocessLoopProfiles(Function &F) {
+  std::list<Loop *> loops(LI->begin(), LI->end());
 
-  while( !loops.empty() )
-  {
+  while (!loops.empty()) {
     Loop *L = loops.front();
     loops.pop_front();
 
     bool skipLoop = false;
-    for(auto LI : LoopProfiles)
-      if(LI->L ==  L && LI->isOmpLoop){
+    for (auto LI : LoopProfiles)
+      if (LI->L == L && LI->isOmpLoop) {
         skipLoop = true;
         break;
       }
 
-    if(skipLoop){
+    if (skipLoop) {
       errs() << "SUSAN: skipping omp loop: " << *L << "\n";
       loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+                   L->getSubLoops().end());
       continue;
     }
 
     errs() << "CBackend: here? 1175\n";
     PHINode *IV = getInductionVariable(L);
-    if(!IV){
+    if (!IV) {
       errs() << "SUSAN: recording while loop profile:" << *L << "\n";
-      LoopProfile* LP = new LoopProfile();
+      LoopProfile *LP = new LoopProfile();
       LP->isForLoop = false;
       LP->L = L;
       LP->IV = nullptr;
@@ -1214,76 +1250,74 @@ void CWriter::preprocessLoopProfiles(Function &F){
       LP->lbAlloca = nullptr;
       bool negateCondition = false;
       Instruction *condInst = findCondInst(LP->L, negateCondition);
-      if(condInst)
+      if (condInst)
         errs() << "while loop condInst" << *condInst << "\n";
       LoopProfiles.insert(LP);
 
       loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+                   L->getSubLoops().end());
       continue;
     }
 
-    LoopProfile* LP = new LoopProfile();
+    LoopProfile *LP = new LoopProfile();
     LP->isForLoop = true;
     LP->L = L;
     LP->IV = IV;
     LP->IVInc = getIVIncrement(L, IV);
 
-    if(LI->getLoopFor(IV->getIncomingBlock(0)) != L)
+    if (LI->getLoopFor(IV->getIncomingBlock(0)) != L)
       LP->lb = IV->getIncomingValue(0);
-    else if((LI->getLoopFor(IV->getIncomingBlock(0)) == L))
+    else if ((LI->getLoopFor(IV->getIncomingBlock(0)) == L))
       LP->incr = IV->getIncomingValue(0);
 
-    if(LI->getLoopFor(IV->getIncomingBlock(1)) != L)
+    if (LI->getLoopFor(IV->getIncomingBlock(1)) != L)
       LP->lb = IV->getIncomingValue(1);
-    else if((LI->getLoopFor(IV->getIncomingBlock(1)) == L))
+    else if ((LI->getLoopFor(IV->getIncomingBlock(1)) == L))
       LP->incr = IV->getIncomingValue(1);
 
     bool negateCondition = false;
     Instruction *condInst = findCondInst(LP->L, negateCondition);
     Value *ub = condInst->getOperand(1);
-    //LP->ub = findOriginalValue(ub);
+    // LP->ub = findOriginalValue(ub);
     LP->ub = ub;
     errs() << "none omp loop ub: " << *LP->ub << "\n";
 
     LP->lbAlloca = nullptr;
-    //LP->ub = nullptr; //note: ub is included in condinst unless it is a omp loop
+    // LP->ub = nullptr; //note: ub is included in condinst unless it is a omp
+    // loop
     LP->isOmpLoop = false;
 
     LP->nestlevel = -1;
     LoopProfiles.insert(LP);
 
-    loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+    loops.insert(loops.end(), L->getSubLoops().begin(), L->getSubLoops().end());
   }
-
 
   errs() << "=========LOOP PROFILES=========\n";
-  for(auto LP : LoopProfiles){
-    if(!LP->isForLoop) continue;
+  for (auto LP : LoopProfiles) {
+    if (!LP->isForLoop)
+      continue;
     errs() << "Loop: " << *LP->L << "\n";
     errs() << "isomp: " << LP->isOmpLoop << "\n";
-    //errs() << "ub: " << *LP->ub << "\n";
+    // errs() << "ub: " << *LP->ub << "\n";
   }
-
-
 }
 
-
-
-void CWriter::removeBranchTarget(BranchInst *br, int destIdx){
+void CWriter::removeBranchTarget(BranchInst *br, int destIdx) {
   errs() << "SUSAN: removing branch target: " << *br << "\n";
   IRBuilder<> brBuilder(br);
-  std::set<BasicBlock*>succBB2Remove;
-  for (auto succ = succ_begin(br); succ != succ_end(br); ++succ){
-	  BasicBlock *succBB = *succ;
-    if(br->getSuccessor(destIdx) == succBB) continue;
-    for (pred_iterator PI = pred_begin(succBB), E = pred_end(succBB); PI != E; ++PI)
-      if(*PI == br->getParent())
+  std::set<BasicBlock *> succBB2Remove;
+  for (auto succ = succ_begin(br); succ != succ_end(br); ++succ) {
+    BasicBlock *succBB = *succ;
+    if (br->getSuccessor(destIdx) == succBB)
+      continue;
+    for (pred_iterator PI = pred_begin(succBB), E = pred_end(succBB); PI != E;
+         ++PI)
+      if (*PI == br->getParent())
         succBB2Remove.insert(succBB);
     errs() << "SUSAN: inserting succBB: " << succBB->getName() << "\n";
   }
-  for(auto succBB : succBB2Remove){
+  for (auto succBB : succBB2Remove) {
     errs() << "SUSAN: removing succBB" << *succBB << "\n";
     succBB->removePredecessor(br->getParent());
   }
@@ -1291,21 +1325,25 @@ void CWriter::removeBranchTarget(BranchInst *br, int destIdx){
   Value *newBr = brBuilder.CreateBr(br->getSuccessor(destIdx));
 }
 
-void CWriter::preprocessSkippableBranches(Function &F){
+void CWriter::preprocessSkippableBranches(Function &F) {
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     BranchInst *br = dyn_cast<BranchInst>(&*I);
-    if(!br) continue;
-    if(!br->isConditional()) continue;
-    Loop* L = LI->getLoopFor(br->getParent());
-    if(L && L->getLoopLatch()->getTerminator() == br) continue;
+    if (!br)
+      continue;
+    if (!br->isConditional())
+      continue;
+    Loop *L = LI->getLoopFor(br->getParent());
+    if (L && L->getLoopLatch()->getTerminator() == br)
+      continue;
     ICmpInst *cmp = dyn_cast<ICmpInst>(br->getCondition());
-    if(!cmp) continue;
+    if (!cmp)
+      continue;
 
-    Value* opnd0 = cmp->getOperand(0);
-    Value* opnd1 = cmp->getOperand(1);
+    Value *opnd0 = cmp->getOperand(0);
+    Value *opnd1 = cmp->getOperand(1);
     errs() << "SUSAN: opnd0" << *opnd0 << "\n";
     errs() << "SUSAN: opnd1" << *opnd1 << "\n";
-    if(isInductionVariable(opnd0) || isInductionVariable(opnd1))
+    if (isInductionVariable(opnd0) || isInductionVariable(opnd1))
       continue;
 
     opnd0 = findOriginalValue(opnd0);
@@ -1313,42 +1351,42 @@ void CWriter::preprocessSkippableBranches(Function &F){
 
     // check if it's a call to omp master
     bool isMasterCall = false;
-    if(CallInst* CI = dyn_cast<CallInst>(opnd0))
-      if(Function *ompCall = CI->getCalledFunction())
-        if(ompCall->getName().contains("__kmpc_master"))
-          if(cmp->getPredicate() == CmpInst::ICMP_EQ)
+    if (CallInst *CI = dyn_cast<CallInst>(opnd0))
+      if (Function *ompCall = CI->getCalledFunction())
+        if (ompCall->getName().contains("__kmpc_master"))
+          if (cmp->getPredicate() == CmpInst::ICMP_EQ)
             isMasterCall = true;
-    if(isMasterCall){
+    if (isMasterCall) {
       deadBranches[br] = 1;
       continue;
     }
 
-    for(auto LP : LoopProfiles){
-      if(LP->isForLoop){
+    for (auto LP : LoopProfiles) {
+      if (LP->isForLoop) {
         Value *UpperBound = findOriginalValue(LP->ub);
-        errs() << "SUSAN: LP->ub: "  << *LP->ub << "\n";
-        //if(LoadInst *ldUB = dyn_cast<LoadInst>(LP->ub))
-        //  UpperBound = ldUB->getPointerOperand();
-        errs() << "SUSAN: upperbound: "  << *LP->ub << "\n";
+        errs() << "SUSAN: LP->ub: " << *LP->ub << "\n";
+        // if(LoadInst *ldUB = dyn_cast<LoadInst>(LP->ub))
+        //   UpperBound = ldUB->getPointerOperand();
+        errs() << "SUSAN: upperbound: " << *LP->ub << "\n";
 
-        //if(UpperBound == opnd0){
-        //   if ((cmp->getPredicate() == CmpInst::ICMP_SGT
-        //        || cmp->getPredicate() == CmpInst::ICMP_UGT)){
-        //    errs() << "SUSAN: deadbranch: " << *br << "\n";
-        //    deadBranches[br] = 0;
-        //   }
-        //}
-        //else if(UpperBound == opnd1){
-        //  bool negateCondition = false;
-        //  Instruction *condInst = findCondInst(LP->L, negateCondition);
-        //  if(cmp == condInst) continue;
+        // if(UpperBound == opnd0){
+        //    if ((cmp->getPredicate() == CmpInst::ICMP_SGT
+        //         || cmp->getPredicate() == CmpInst::ICMP_UGT)){
+        //     errs() << "SUSAN: deadbranch: " << *br << "\n";
+        //     deadBranches[br] = 0;
+        //    }
+        // }
+        // else if(UpperBound == opnd1){
+        //   bool negateCondition = false;
+        //   Instruction *condInst = findCondInst(LP->L, negateCondition);
+        //   if(cmp == condInst) continue;
 
         //  if (cmp->getPredicate() == CmpInst::ICMP_SLT
         //      || cmp->getPredicate() == CmpInst::ICMP_ULT){
         //    deadBranches[br] = 0;
         //  }
         //}
-        //else if(LP->lbAlloca == opnd0
+        // else if(LP->lbAlloca == opnd0
         //    && (cmp->getPredicate() == CmpInst::ICMP_SGT
         //        || cmp->getPredicate() == CmpInst::ICMP_UGT)){
         //   Value *opnd1 = cmp->getOperand(1);
@@ -1356,65 +1394,70 @@ void CWriter::preprocessSkippableBranches(Function &F){
         //     deadBranches[br] = 1;
         //   }
         //}
-      }
-      else{
+      } else {
         bool negateCondition;
-        Instruction* condInst = findCondInst(LP->L, negateCondition);
+        Instruction *condInst = findCondInst(LP->L, negateCondition);
         Value *loopCondOpnd0 = condInst->getOperand(0);
         Value *loopCondOpnd1 = condInst->getOperand(1);
-        if(loopCondOpnd1 != opnd1 && loopCondOpnd0 != opnd0 ) continue;
+        if (loopCondOpnd1 != opnd1 && loopCondOpnd0 != opnd0)
+          continue;
 
         bool isDoWhileReversed = false;
-        if(loopCondOpnd1 == opnd1){
-          for(User *user : opnd0->users()){
+        if (loopCondOpnd1 == opnd1) {
+          for (User *user : opnd0->users()) {
             PHINode *userPhi = dyn_cast<PHINode>(user);
-            if(!userPhi) continue;
-            for(unsigned i=0; i<userPhi->getNumIncomingValues(); ++i)
-              if(userPhi->getIncomingValue(i) == loopCondOpnd0)
+            if (!userPhi)
+              continue;
+            for (unsigned i = 0; i < userPhi->getNumIncomingValues(); ++i)
+              if (userPhi->getIncomingValue(i) == loopCondOpnd0)
                 isDoWhileReversed = true;
           }
         }
 
-        if(!isDoWhileReversed) continue;
+        if (!isDoWhileReversed)
+          continue;
 
-        if(!negateCondition){
+        if (!negateCondition) {
           errs() << "SUSAN: found deadbranch for while loop: " << *br << "\n";
           deadBranches[br] = 0;
-        }
-        else{
+        } else {
           deadBranches[br] = 1;
         }
       }
     }
   }
 
-  for(auto [branch, dest] : deadBranches)
+  for (auto [branch, dest] : deadBranches)
     removeBranchTarget(branch, dest);
-  for(auto [branch, dest] : deadBranches)
+  for (auto [branch, dest] : deadBranches)
     branch->eraseFromParent();
 
-  for(auto &BB : F){
+  for (auto &BB : F) {
     errs() << "SUSAN: BB:" << BB << "\n";
   }
 }
 
-void CWriter::preprocessSkippableInsts(Function &F){
-  //skip ands with xFFFFFFFF
+void CWriter::preprocessSkippableInsts(Function &F) {
+  // skip ands with xFFFFFFFF
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     BinaryOperator *binop = dyn_cast<BinaryOperator>(&*I);
-    if(!binop) continue;
+    if (!binop)
+      continue;
 
     auto opcode = binop->getOpcode();
-    if(opcode != Instruction::And) continue;
+    if (opcode != Instruction::And)
+      continue;
 
-    if(ConstantInt *consInt = dyn_cast<ConstantInt>(binop->getOperand(0)))
-      if(consInt->getZExtValue() == 4294967295 || consInt->getZExtValue() == 34359738360){
+    if (ConstantInt *consInt = dyn_cast<ConstantInt>(binop->getOperand(0)))
+      if (consInt->getZExtValue() == 4294967295 ||
+          consInt->getZExtValue() == 34359738360) {
         deleteAndReplaceInsts[&*I] = binop->getOperand(1);
         continue;
       }
 
-    if(ConstantInt *consInt = dyn_cast<ConstantInt>(binop->getOperand(1))){
-      if(consInt->getZExtValue() == 4294967295 || consInt->getZExtValue() == 34359738360){
+    if (ConstantInt *consInt = dyn_cast<ConstantInt>(binop->getOperand(1))) {
+      if (consInt->getZExtValue() == 4294967295 ||
+          consInt->getZExtValue() == 34359738360) {
         errs() << "SUSAN: resgitering deleteAndReplaceInsts: " << *I << "\n";
         deleteAndReplaceInsts[&*I] = binop->getOperand(0);
         continue;
@@ -1423,71 +1466,74 @@ void CWriter::preprocessSkippableInsts(Function &F){
   }
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     LoadInst *ld = dyn_cast<LoadInst>(&*I);
-    if(!ld) continue;
-    if(ld->getPointerOperand()->getName() == "stderr"){
+    if (!ld)
+      continue;
+    if (ld->getPointerOperand()->getName() == "stderr") {
       errs() << "SUSAN: added stderr to delete insts\n";
       deleteAndReplaceInsts[&*I] = ld->getPointerOperand();
     }
   }
 }
 
-void CWriter::EliminateDeadInsts(Function &F){
+void CWriter::EliminateDeadInsts(Function &F) {
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     Instruction *inst = &*I;
 
-    if(CallInst *CI = dyn_cast<CallInst>(inst)){
+    if (CallInst *CI = dyn_cast<CallInst>(inst)) {
       errs() << "SUSAN: CI at 1400: " << *CI << "\n";
-      if(Function *F = CI->getCalledFunction()){
-        if(F->getName() == "malloc"){
+      if (Function *F = CI->getCalledFunction()) {
+        if (F->getName() == "malloc") {
           errs() << "SUSAN: found malloc 1403: " << *inst << "\n";
           for (User *U : inst->users())
-            if(isa<StoreInst>(U)){
+            if (isa<StoreInst>(U)) {
               errs() << "SUSAN: found storeinst 1404: " << *U << "\n";
               deadInsts.insert(cast<Instruction>(U));
             }
-        } else if (F->getName() == "strtol"){
+        } else if (F->getName() == "strtol") {
           for (User *U : inst->users())
-            if(isa<TruncInst>(U)){
-              TruncInst* trunc = cast<TruncInst>(U);
+            if (isa<TruncInst>(U)) {
+              TruncInst *trunc = cast<TruncInst>(U);
               for (User *truncU : trunc->users())
-                if(isa<StoreInst>(truncU)){
+                if (isa<StoreInst>(truncU)) {
                   errs() << "SUSAN: dead trunc: " << *truncU << "\n";
                   deadInsts.insert(cast<Instruction>(truncU));
-                  StoreInst* store = cast<StoreInst>(truncU);
-                  Instruction* ptrOpnd = dyn_cast<Instruction>(store->getPointerOperand());
-                  if(!ptrOpnd) continue;
+                  StoreInst *store = cast<StoreInst>(truncU);
+                  Instruction *ptrOpnd =
+                      dyn_cast<Instruction>(store->getPointerOperand());
+                  if (!ptrOpnd)
+                    continue;
                   deadInsts.insert(ptrOpnd);
                 }
             }
         }
       }
-    }
-    else if(IS_OPENMP_FUNCTION && isa<ReturnInst>(inst)){
+    } else if (IS_OPENMP_FUNCTION && isa<ReturnInst>(inst)) {
       errs() << "SUSAN: add return to deadinst: " << *inst << "\n";
       deadInsts.insert(inst);
     }
 
-    if(inst->getName().contains("kmpc_loc")){
+    if (inst->getName().contains("kmpc_loc")) {
       errs() << "SUSAN: kmpc_loc found!!!\n";
       deadInsts.insert(inst);
 
-      std::set<Instruction*> visited;
-      std::queue<Instruction*> toVisit;
+      std::set<Instruction *> visited;
+      std::queue<Instruction *> toVisit;
       visited.insert(inst);
       toVisit.push(inst);
       deadInsts.insert(inst);
 
-      while(!toVisit.empty()){
+      while (!toVisit.empty()) {
         Instruction *currInst = toVisit.front();
         toVisit.pop();
 
-        for(User *U : currInst->users()){
+        for (User *U : currInst->users()) {
           Instruction *userInst = dyn_cast<Instruction>(U);
-          if(userInst && visited.find(userInst) ==visited.end() ){
+          if (userInst && visited.find(userInst) == visited.end()) {
             visited.insert(userInst);
             toVisit.push(userInst);
-            CallInst* CI = dyn_cast<CallInst>(userInst);
-            if(CI && ompFuncs.find(CI) != ompFuncs.end()) continue;
+            CallInst *CI = dyn_cast<CallInst>(userInst);
+            if (CI && ompFuncs.find(CI) != ompFuncs.end())
+              continue;
             deadInsts.insert(userInst);
           }
         }
@@ -1495,17 +1541,18 @@ void CWriter::EliminateDeadInsts(Function &F){
       continue;
     }
   }
-  //first record all the liveins for openmp functions
-  //any instructions that's not in an omp loop or not an livein should be eliminated
-  if(IS_OPENMP_FUNCTION){
-    for(auto LP : LoopProfiles)
-      if(LP->isForLoop)
+  // first record all the liveins for openmp functions
+  // any instructions that's not in an omp loop or not an livein should be
+  // eliminated
+  if (IS_OPENMP_FUNCTION) {
+    for (auto LP : LoopProfiles)
+      if (LP->isForLoop)
         OMP_RecordLiveIns(LP);
 
     errs() << "==========omp liveins========\n";
-    for(auto [L, liveins] : omp_liveins){
+    for (auto [L, liveins] : omp_liveins) {
       errs() << "loop: " << *L << "\n";
-      for(auto livein : liveins)
+      for (auto livein : liveins)
         errs() << "livein: " << *livein << "\n";
     }
     errs() << "==========omp liveins end========\n";
@@ -1513,30 +1560,29 @@ void CWriter::EliminateDeadInsts(Function &F){
     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
       Instruction *inst = &*I;
 
-
-
-
       bool isLoopLiveIn = false;
-      for(auto [loop, liveins] : omp_liveins)
-        if(liveins.find(inst) != liveins.end()){
+      for (auto [loop, liveins] : omp_liveins)
+        if (liveins.find(inst) != liveins.end()) {
           errs() << "SUSAN: livein: " << *inst << "\n";
           isLoopLiveIn = true;
           break;
         }
-      if(isLoopLiveIn) continue;
+      if (isLoopLiveIn)
+        continue;
       Loop *L = LI->getLoopFor(inst->getParent());
       bool isOmpLoop = false;
-      for(auto LP : LoopProfiles){
-        if(LP->L == L && LP->isOmpLoop){
+      for (auto LP : LoopProfiles) {
+        if (LP->L == L && LP->isOmpLoop) {
           isOmpLoop = true;
         }
       }
-      if(isOmpLoop) continue;
+      if (isOmpLoop)
+        continue;
 
       bool nestedInOmpLoop = false;
-      while(L){
-        for(auto LP : LoopProfiles){
-          if(LP->L == L && LP->isOmpLoop){
+      while (L) {
+        for (auto LP : LoopProfiles) {
+          if (LP->L == L && LP->isOmpLoop) {
             errs() << "nested in omploop:" << *inst << "\n";
             nestedInOmpLoop = true;
             break;
@@ -1544,7 +1590,8 @@ void CWriter::EliminateDeadInsts(Function &F){
         }
         L = L->getParentLoop();
       }
-      if(nestedInOmpLoop) continue;
+      if (nestedInOmpLoop)
+        continue;
 
       errs() << "SUSAN: adding to deadInsts" << *inst << "\n";
       deadInsts.insert(inst);
@@ -1552,108 +1599,108 @@ void CWriter::EliminateDeadInsts(Function &F){
 
     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
       PHINode *phi = dyn_cast<PHINode>(&*I);
-      if(!phi) continue;
+      if (!phi)
+        continue;
 
       bool isDead = true;
-      for(unsigned i=0; i<phi->getNumIncomingValues(); ++i){
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         Instruction *val = dyn_cast<Instruction>(phi->getIncomingValue(i));
-        if(!val){
+        if (!val) {
           isDead = false;
           break;
         }
-        if(deadInsts.find(val) == deadInsts.end()){
+        if (deadInsts.find(val) == deadInsts.end()) {
           isDead = false;
           break;
         }
       }
 
-      if(isDead){
+      if (isDead) {
         errs() << "SUSAN: add phi to deadInst: " << *I << "\n";
         deadInsts.insert(&*I);
       }
     }
-
   }
 }
 
-void CWriter::FindInductionVariableRelationships(){
-  std::list<Loop*> loops( LI->begin(), LI->end() );
-  while( !loops.empty() )
-  {
+void CWriter::FindInductionVariableRelationships() {
+  std::list<Loop *> loops(LI->begin(), LI->end());
+  while (!loops.empty()) {
     Loop *L = loops.front();
     loops.pop_front();
 
     BasicBlock *header = L->getHeader();
     PHINode *headIV = nullptr;
-    for(auto &I : *header){
+    for (auto &I : *header) {
       PHINode *phi = dyn_cast<PHINode>(&I);
-      if(!phi) break;
-      if(isInductionVariable(phi)){
+      if (!phi)
+        break;
+      if (isInductionVariable(phi)) {
         headIV = phi;
         break;
       }
     }
 
-    if(!headIV){
+    if (!headIV) {
       loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+                   L->getSubLoops().end());
       continue;
     }
 
-    for(auto &I : *header){
+    for (auto &I : *header) {
       PHINode *phi = dyn_cast<PHINode>(&I);
-      if(!phi) break;
-      if(isExtraInductionVariable(phi))
+      if (!phi)
+        break;
+      if (isExtraInductionVariable(phi))
         IVMap[headIV].insert(phi);
     }
 
-    loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+    loops.insert(loops.end(), L->getSubLoops().begin(), L->getSubLoops().end());
   }
 
   errs() << "========== IV MAP==========\n";
-  for(auto [phi, extraPHIs] : IVMap){
+  for (auto [phi, extraPHIs] : IVMap) {
     errs() << "SUSAN: headPHI: " << *phi << "\n";
-    for(auto extraPhi : extraPHIs)
+    for (auto extraPhi : extraPHIs)
       errs() << "SUSAN: phi: " << *extraPhi << "\n";
   }
 }
 
-void CWriter::preprocessIVIncrements(){
-  std::list<Loop*> loops( LI->begin(), LI->end() );
-  while( !loops.empty() )
-  {
+void CWriter::preprocessIVIncrements() {
+  std::list<Loop *> loops(LI->begin(), LI->end());
+  while (!loops.empty()) {
     Loop *L = loops.front();
     loops.pop_front();
-    LoopProfile* LP = findLoopProfile(L);
+    LoopProfile *LP = findLoopProfile(L);
     IVInc2IV[LP->IVInc] = LP->IV;
-    loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+    loops.insert(loops.end(), L->getSubLoops().begin(), L->getSubLoops().end());
   }
 }
 
-bool CWriter::hasHigherOrderOps(Instruction* I, std::set<unsigned> higherOrderOpcodes){
+bool CWriter::hasHigherOrderOps(Instruction *I,
+                                std::set<unsigned> higherOrderOpcodes) {
 
-  std::queue<Instruction*> toVisit;
-  std::set<Instruction*> visited;
+  std::queue<Instruction *> toVisit;
+  std::set<Instruction *> visited;
   toVisit.push(I);
   visited.insert(I);
 
-  while(!toVisit.empty()){
+  while (!toVisit.empty()) {
     Instruction *currInst = toVisit.front();
     toVisit.pop();
 
     errs() << "currInst :" << *currInst << "\n";
-    for(auto op : higherOrderOpcodes){
-      if(currInst->getOpcode() == op)
+    for (auto op : higherOrderOpcodes) {
+      if (currInst->getOpcode() == op)
         return true;
     }
 
-    if(!isInlinableInst(*currInst)) break;
+    if (!isInlinableInst(*currInst))
+      break;
 
-    for(User *U : currInst->users()){
-      if(Instruction *inst = dyn_cast<Instruction>(U)){
-        if(visited.find(inst) == visited.end()){
+    for (User *U : currInst->users()) {
+      if (Instruction *inst = dyn_cast<Instruction>(U)) {
+        if (visited.find(inst) == visited.end()) {
           visited.insert(inst);
           toVisit.push(inst);
         }
@@ -1663,34 +1710,43 @@ bool CWriter::hasHigherOrderOps(Instruction* I, std::set<unsigned> higherOrderOp
   return false;
 }
 
-void CWriter::preprocessInsts2AddParenthesis(Function &F){
-  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I){
-    std::set<unsigned>level5operators, level4operators, level3operators, level2operators;
-    level5operators.insert({Instruction::Shl, Instruction::LShr, Instruction::AShr});
+void CWriter::preprocessInsts2AddParenthesis(Function &F) {
+  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+    std::set<unsigned> level5operators, level4operators, level3operators,
+        level2operators;
+    level5operators.insert(
+        {Instruction::Shl, Instruction::LShr, Instruction::AShr});
     level4operators.insert({Instruction::Add, Instruction::Sub});
-    level3operators.insert({Instruction::Mul, Instruction::FMul, Instruction::SDiv, Instruction::UDiv,
-                            Instruction::FDiv, Instruction::URem, Instruction::SRem, Instruction::FRem});
-    level2operators.insert({Instruction::FNeg, Instruction::GetElementPtr, Instruction::Load});
+    level3operators.insert({Instruction::Mul, Instruction::FMul,
+                            Instruction::SDiv, Instruction::UDiv,
+                            Instruction::FDiv, Instruction::URem,
+                            Instruction::SRem, Instruction::FRem});
+    level2operators.insert(
+        {Instruction::FNeg, Instruction::GetElementPtr, Instruction::Load});
 
-    if(!isInlinableInst(*I)) continue;
-    if(Instruction* op = dyn_cast<Instruction>(&*I)){
+    if (!isInlinableInst(*I))
+      continue;
+    if (Instruction *op = dyn_cast<Instruction>(&*I)) {
       auto opcode = op->getOpcode();
-      std::set<unsigned>higherOrderOpcodes;
-      if(level3operators.find(opcode) != level3operators.end()){
-        higherOrderOpcodes.insert(level2operators.begin(), level2operators.end());
-      }
-      else if(level4operators.find(opcode) != level4operators.end()){
-        higherOrderOpcodes.insert(level2operators.begin(), level2operators.end());
-        higherOrderOpcodes.insert(level3operators.begin(), level3operators.end());
-      }
-      else if(level5operators.find(opcode) != level5operators.end()){
-        higherOrderOpcodes.insert(level2operators.begin(), level2operators.end());
-        higherOrderOpcodes.insert(level3operators.begin(), level3operators.end());
-        higherOrderOpcodes.insert(level4operators.begin(), level4operators.end());
+      std::set<unsigned> higherOrderOpcodes;
+      if (level3operators.find(opcode) != level3operators.end()) {
+        higherOrderOpcodes.insert(level2operators.begin(),
+                                  level2operators.end());
+      } else if (level4operators.find(opcode) != level4operators.end()) {
+        higherOrderOpcodes.insert(level2operators.begin(),
+                                  level2operators.end());
+        higherOrderOpcodes.insert(level3operators.begin(),
+                                  level3operators.end());
+      } else if (level5operators.find(opcode) != level5operators.end()) {
+        higherOrderOpcodes.insert(level2operators.begin(),
+                                  level2operators.end());
+        higherOrderOpcodes.insert(level3operators.begin(),
+                                  level3operators.end());
+        higherOrderOpcodes.insert(level4operators.begin(),
+                                  level4operators.end());
       }
 
-
-      if(hasHigherOrderOps(&*I, higherOrderOpcodes) && !isIVIncrement(&*I)){
+      if (hasHigherOrderOps(&*I, higherOrderOpcodes) && !isIVIncrement(&*I)) {
         errs() << "SUSAN: add () to inst: " << *op << "\n";
         addParenthesis.insert(op);
       }
@@ -1698,82 +1754,94 @@ void CWriter::preprocessInsts2AddParenthesis(Function &F){
   }
 }
 
-void CWriter::buildIVNames(){
-  //for(auto [callInst, utask] : ompFuncs){
-  //  auto L = LI->getLoopFor(callInst->getParent());
-  //  if(!L) continue;
-  //  errs() << "SUSAN: found loop over callInst " << *callInst << "\n";
-  //  errs() << "depth " << L->getLoopDepth() << "\n";
-  //  errs() << "SUSAN: utask: " << *utask << "\n";
-  //  FunctionTopLoopLevels[utask] = L->getLoopDepth();
-  //}
+void CWriter::buildIVNames() {
+  // for(auto [callInst, utask] : ompFuncs){
+  //   auto L = LI->getLoopFor(callInst->getParent());
+  //   if(!L) continue;
+  //   errs() << "SUSAN: found loop over callInst " << *callInst << "\n";
+  //   errs() << "depth " << L->getLoopDepth() << "\n";
+  //   errs() << "SUSAN: utask: " << *utask << "\n";
+  //   FunctionTopLoopLevels[utask] = L->getLoopDepth();
+  // }
 
-  for(auto LP : LoopProfiles){
+  for (auto LP : LoopProfiles) {
     errs() << "LP->LV 1694: " << *(LP->IV) << "\n";
     errs() << "LP->L 1694: " << *(LP->L) << "\n";
     char nestLevel = LP->L->getLoopDepth() - 1;
 
-    //auto F = LP->L->getHeader()->getParent();
-    //errs() << "SUSAN: function 1685: " << *F << "\n";
-    //if(FunctionTopLoopLevels.find(F) != FunctionTopLoopLevels.end()){
-    //  nestLevel += FunctionTopLoopLevels[F];
-    //  errs() << "SUSAN: adding loop level to loop in Function: " << *F << "\n";
-    //}
-    char name[2] = {'i'+nestLevel, '\0'};
+    // auto F = LP->L->getHeader()->getParent();
+    // errs() << "SUSAN: function 1685: " << *F << "\n";
+    // if(FunctionTopLoopLevels.find(F) != FunctionTopLoopLevels.end()){
+    //   nestLevel += FunctionTopLoopLevels[F];
+    //   errs() << "SUSAN: adding loop level to loop in Function: " << *F <<
+    //   "\n";
+    // }
+    char name[2] = {'i' + nestLevel, '\0'};
     errs() << "nestlevel: " << name << "\n";
     IV2Name[LP->IV] = name;
     IV2Name[LP->IVInc] = name;
   }
 }
 
-void CWriter::collectNotInlinableBinOps(Function &F){
-    for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I){
-      PHINode *phi = dyn_cast<PHINode>(&*I);
-      if(!phi) continue;
-      for(unsigned i=0; i<phi->getNumIncomingValues(); ++i){
-        BinaryOperator *incomingI = dyn_cast<BinaryOperator>(phi->getIncomingValue(i));
-        if(incomingI)
-          notInlinableBinOps.insert(incomingI);
-      }
+void CWriter::collectNotInlinableBinOps(Function &F) {
+  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+    PHINode *phi = dyn_cast<PHINode>(&*I);
+    if (!phi)
+      continue;
+    for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+      BinaryOperator *incomingI =
+          dyn_cast<BinaryOperator>(phi->getIncomingValue(i));
+      if (incomingI)
+        notInlinableBinOps.insert(incomingI);
     }
+  }
 }
 
-void CWriter::findDoubleGEP(Function &F){
-  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I){
+void CWriter::findDoubleGEP(Function &F) {
+  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
     LoadInst *ld = dyn_cast<LoadInst>(&*I);
     StoreInst *st = dyn_cast<StoreInst>(&*I);
-    if(!ld && !st) continue;
-    if(ld){
-      if(GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(ld->getPointerOperand())){
+    if (!ld && !st)
+      continue;
+    if (ld) {
+      if (GetElementPtrInst *gep =
+              dyn_cast<GetElementPtrInst>(ld->getPointerOperand())) {
         auto indices = gep->getNumIndices();
-        if(GetElementPtrInst* gep2 = dyn_cast<GetElementPtrInst>(gep->getPointerOperand())){
+        if (GetElementPtrInst *gep2 =
+                dyn_cast<GetElementPtrInst>(gep->getPointerOperand())) {
           auto indices2 = gep2->getNumIndices();
-          if(indices == indices2 && indices == 1)
+          if (indices == indices2 && indices == 1)
             errs() << "SUSAN: found double gep: 1703: " << *ld << "\n";
           errs() << "SUSAN: gep 1704: " << *gep << "\n";
           errs() << "SUSAN: gep2 1705: " << *gep2 << "\n";
-          PointerType *ptrTy = dyn_cast<PointerType>(gep2->getPointerOperand()->getType());
-          //if(!isa<GetElementPtrInst>(gep2->getPointerOperand()) &&
-          //    (valuesCast2Double.find(gep2->getPointerOperand()) == valuesCast2Double.end()) &&
-          //    !ptrTy->getPointerElementType()->isDoubleTy())
-            doubleGeps[ld] = gep2->getPointerOperand();
+          PointerType *ptrTy =
+              dyn_cast<PointerType>(gep2->getPointerOperand()->getType());
+          // if(!isa<GetElementPtrInst>(gep2->getPointerOperand()) &&
+          //     (valuesCast2Double.find(gep2->getPointerOperand()) ==
+          //     valuesCast2Double.end()) &&
+          //     !ptrTy->getPointerElementType()->isDoubleTy())
+          doubleGeps[ld] = gep2->getPointerOperand();
         }
       }
-    } else{
-      if(GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(st->getPointerOperand())){
+    } else {
+      if (GetElementPtrInst *gep =
+              dyn_cast<GetElementPtrInst>(st->getPointerOperand())) {
         auto indices = gep->getNumIndices();
-        if(GetElementPtrInst* gep2 = dyn_cast<GetElementPtrInst>(gep->getPointerOperand())){
+        if (GetElementPtrInst *gep2 =
+                dyn_cast<GetElementPtrInst>(gep->getPointerOperand())) {
           auto indices2 = gep2->getNumIndices();
-          if(indices == indices2 && indices == 1)
+          if (indices == indices2 && indices == 1)
             errs() << "SUSAN: found double gep: 1713: " << *st << "\n";
           errs() << "SUSAN: gep 1715: " << *gep << "\n";
           errs() << "SUSAN: gep2 1716: " << *gep2 << "\n";
-          PointerType *ptrTy = dyn_cast<PointerType>(gep2->getPointerOperand()->getType());
-          //if(!isa<GetElementPtrInst>(gep2->getPointerOperand()) &&
-          //    !ptrTy->getPointerElementType()->isDoubleTy())
-          //    (valuesCast2Double.find(gep2->getPointerOperand()) == valuesCast2Double.end()) &&
-          //    !ptrTy->getPointerElementType()->isDoubleTy())
-            doubleGeps[st] = gep2->getPointerOperand();
+          PointerType *ptrTy =
+              dyn_cast<PointerType>(gep2->getPointerOperand()->getType());
+          // if(!isa<GetElementPtrInst>(gep2->getPointerOperand()) &&
+          //     !ptrTy->getPointerElementType()->isDoubleTy())
+          //     (valuesCast2Double.find(gep2->getPointerOperand()) ==
+          //     valuesCast2Double.end()) &&
+          //     !ptrTy->getPointerElementType()->isDoubleTy())
+          doubleGeps[st] = gep2->getPointerOperand();
         }
       }
     }
@@ -1785,13 +1853,13 @@ bool CWriter::runOnModule(Module &M) {
   cnt_reconstructedVariables = 0;
   bool Modified = false;
   findOMPFunctions(M);
-  std::set<Function*> functionUsed;
+  std::set<Function *> functionUsed;
 
-  //TODO: do not print any functions not being called
+  // TODO: do not print any functions not being called
   for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
     Function *F = &*FI;
     for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
-      if(CallInst *callInst = dyn_cast<CallInst>(&*I)){
+      if (CallInst *callInst = dyn_cast<CallInst>(&*I)) {
         functionUsed.insert(callInst->getCalledFunction());
       }
     }
@@ -1802,23 +1870,29 @@ bool CWriter::runOnModule(Module &M) {
 
     Function *F = &*FI;
     errs() << "CBackend: iterating function 1759: " << F->getName() << "\n";
-    if(F->isIntrinsic()) continue;
-    if(F->isDeclaration()) continue;
-    if(F->getName() == "xmalloc") continue;
-    if(functionUsed.find(F) == functionUsed.end() && F->getName() != "main") continue;
+    if (F->isIntrinsic())
+      continue;
+    if (F->isDeclaration())
+      continue;
+    if (F->getName() == "xmalloc")
+      continue;
+    if (functionUsed.find(F) == functionUsed.end() && F->getName() != "main")
+      continue;
 
     IS_OPENMP_FUNCTION = false;
-    for(auto [call, utask] : ompFuncs){
+    for (auto [call, utask] : ompFuncs) {
       errs() << "OMP FUNC: " << *utask << "\n";
-      if(utask == F)
+      if (utask == F)
         IS_OPENMP_FUNCTION = true;
     }
-    if(IS_OPENMP_FUNCTION) continue;
+    if (IS_OPENMP_FUNCTION)
+      continue;
     errs() << "CBackend: printing function 1770" << F->getName() << "\n";
 
     // Do not codegen any 'available_externally' functions at all, they have
     // definitions outside the translation unit.
-    if (F->hasAvailableExternallyLinkage()) continue;
+    if (F->hasAvailableExternallyLinkage())
+      continue;
 
     Modified |= RunAllAnalysis(*F);
 
@@ -1935,9 +2009,9 @@ std::string CWriter::getStructName(StructType *ST) {
 
 // YEBIN: get struct fields to support FIXME
 std::string CWriter::getFieldName(StructType *ST) {
-    std::string StrName = getStructName(ST);
-    StrName.erase(0, 7);
-    return StrName+"_field";
+  std::string StrName = getStructName(ST);
+  StrName.erase(0, 7);
+  return StrName + "_field";
 }
 
 std::string
@@ -2186,10 +2260,10 @@ CWriter::printTypeName(raw_ostream &Out, Type *Ty, bool isSigned,
   }
 
   case Type::ArrayTyID: {
-    //TypedefDeclTypes.insert(Ty);
+    // TypedefDeclTypes.insert(Ty);
     Type *elTy = Ty->getArrayElementType();
     return printTypeName(Out, elTy, false);
-    //return Out << getArrayName(cast<ArrayType>(Ty));
+    // return Out << getArrayName(cast<ArrayType>(Ty));
   }
 #if LLVM_VERSION_MAJOR > 10
   case Type::FixedVectorTyID:
@@ -2233,11 +2307,11 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
     bool empty = isEmptyType(*I);
     if (empty)
       Out << "/* "; // skip zero-sized types
-    //printTypeName(Out, *I, false) << " field" << utostr(Idx);
-    // append struct name to field for FIXME
-    printTypeName(Out, *I, false) << " "+getFieldName(STy) << utostr(Idx);
+    // printTypeName(Out, *I, false) << " field" << utostr(Idx);
+    //  append struct name to field for FIXME
+    printTypeName(Out, *I, false) << " " + getFieldName(STy) << utostr(Idx);
     ArrayType *ArrTy = dyn_cast<ArrayType>(*I);
-    while(ArrTy){
+    while (ArrTy) {
       Out << "[" << ArrTy->getNumElements() << "]";
       ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType());
     }
@@ -2255,79 +2329,94 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
   return Out;
 }
 
-bool CWriter::isInductionVariable(Value* V){
-  if(!V) return false;
+bool CWriter::isInductionVariable(Value *V) {
+  if (!V)
+    return false;
   PHINode *phi = dyn_cast<PHINode>(V);
-  if(!phi) return false;
+  if (!phi)
+    return false;
 
-  Loop* L = LI->getLoopFor(phi->getParent());
-  if(L && getInductionVariable(L) == phi) return true;
+  Loop *L = LI->getLoopFor(phi->getParent());
+  if (L && getInductionVariable(L) == phi)
+    return true;
 
   return false;
 }
 
-bool CWriter::isExtraInductionVariable(Value* V){
-  if(!V) return false;
+bool CWriter::isExtraInductionVariable(Value *V) {
+  if (!V)
+    return false;
   PHINode *phi = dyn_cast<PHINode>(V);
-  if(!phi) return false;
+  if (!phi)
+    return false;
 
-  Loop* L = LI->getLoopFor(phi->getParent());
-  if(!L) return false;
-  if(L && getInductionVariable(L) == phi) return false;
+  Loop *L = LI->getLoopFor(phi->getParent());
+  if (!L)
+    return false;
+  if (L && getInductionVariable(L) == phi)
+    return false;
 
   Type *PhiTy = phi->getType();
   if (!PhiTy->isIntegerTy() && !PhiTy->isFloatingPointTy() &&
-      !PhiTy->isPointerTy()){
+      !PhiTy->isPointerTy()) {
     return false;
   }
 
   const SCEVAddRecExpr *AddRec = nullptr;
-  if(SE->isSCEVable(PhiTy))
-      AddRec = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(phi));
-  if (!AddRec || !AddRec->isAffine()) return false;
+  if (SE->isSCEVable(PhiTy))
+    AddRec = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(phi));
+  if (!AddRec || !AddRec->isAffine())
+    return false;
 
   return true;
 }
 
-bool CWriter::isIVIncrement(Value* V){
-  if(!V) return false;
-  Instruction* inst = dyn_cast<Instruction>(V);
-  if(!inst) return false;
+bool CWriter::isIVIncrement(Value *V) {
+  if (!V)
+    return false;
+  Instruction *inst = dyn_cast<Instruction>(V);
+  if (!inst)
+    return false;
 
-  Loop* L = LI->getLoopFor(inst->getParent());
-  if(!L) return false;
+  Loop *L = LI->getLoopFor(inst->getParent());
+  if (!L)
+    return false;
 
   PHINode *IV = getInductionVariable(L);
-  if(!IV) return false;
-  for(unsigned i=0; i<IV->getNumIncomingValues(); ++i){
+  if (!IV)
+    return false;
+  for (unsigned i = 0; i < IV->getNumIncomingValues(); ++i) {
     BasicBlock *predBB = IV->getIncomingBlock(i);
-    if(LI->getLoopFor(predBB) == L && cast<Instruction>(IV->getIncomingValue(i)) == inst)
+    if (LI->getLoopFor(predBB) == L &&
+        cast<Instruction>(IV->getIncomingValue(i)) == inst)
       return true;
   }
 
   return false;
 }
 
+bool CWriter::isExtraIVIncrement(Value *V) {
+  if (!V)
+    return false;
+  Instruction *inst = dyn_cast<Instruction>(V);
+  if (!inst)
+    return false;
 
-bool CWriter::isExtraIVIncrement(Value* V){
-  if(!V) return false;
-  Instruction* inst = dyn_cast<Instruction>(V);
-  if(!inst) return false;
-
-  Loop* L = LI->getLoopFor(inst->getParent());
-  if(!L) return false;
+  Loop *L = LI->getLoopFor(inst->getParent());
+  if (!L)
+    return false;
 
   PHINode *IV = getInductionVariable(L);
-  if(!IV || IVMap.find(IV) == IVMap.end()) return false;
-  for(auto relatedIV : IVMap[IV]){
-    for(unsigned i=0; i<relatedIV->getNumIncomingValues(); ++i){
+  if (!IV || IVMap.find(IV) == IVMap.end())
+    return false;
+  for (auto relatedIV : IVMap[IV]) {
+    for (unsigned i = 0; i < relatedIV->getNumIncomingValues(); ++i) {
       BasicBlock *predBB = relatedIV->getIncomingBlock(i);
-      if(LI->getLoopFor(predBB) == L &&
+      if (LI->getLoopFor(predBB) == L &&
           cast<Instruction>(relatedIV->getIncomingValue(i)) == inst)
         return true;
     }
   }
-
 
   return false;
 }
@@ -2463,14 +2552,13 @@ bool CWriter::isStandardMain(const FunctionType *FTy) {
   return true;
 }
 
-raw_ostream &
-CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
-                            std::pair<AttributeList, CallingConv::ID> Attrs,
-                            const std::string &Name,
-                            iterator_range<Function::arg_iterator> *ArgList, int skipArgSteps) {
+raw_ostream &CWriter::printFunctionProto(
+    raw_ostream &Out, FunctionType *FTy,
+    std::pair<AttributeList, CallingConv::ID> Attrs, const std::string &Name,
+    iterator_range<Function::arg_iterator> *ArgList, int skipArgSteps) {
   bool shouldFixMain = (Name == "main" && isStandardMain(FTy));
-  
-  //TODO: make sure uses of Name are properly swapped
+
+  // TODO: make sure uses of Name are properly swapped
   std::string demangledName = demangleFunctionName(Name);
 
   AttributeList &PAL = Attrs.first;
@@ -2480,7 +2568,7 @@ CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
     Out << "__noreturn ";
   }
 
-  if(Name.find("cudakernel") != std::string::npos)
+  if (Name.find("cudakernel") != std::string::npos)
     Out << "__global__ ";
 
   bool isStructReturn = false;
@@ -2547,10 +2635,10 @@ CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
   /*
    * OpenMP: if it's an omp function call, skip some args if not needed
    */
-  for(int i=0; i<skipArgSteps; i++){
+  for (int i = 0; i < skipArgSteps; i++) {
     ++I;
     ++Idx;
-    if(ArgList)
+    if (ArgList)
       ++ArgName;
   }
 
@@ -2879,10 +2967,10 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
       Out << ')';
       return;
 
-    case Instruction::GetElementPtr:
-    {
+    case Instruction::GetElementPtr: {
       Out << "(";
-      printGEPExpressionStruct(CE->getOperand(0), gep_type_begin(CPV), gep_type_end(CPV));
+      printGEPExpressionStruct(CE->getOperand(0), gep_type_begin(CPV),
+                               gep_type_end(CPV));
       Out << ")";
       return;
     }
@@ -3056,21 +3144,21 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
       Out << (CI->getZExtValue() ? '1' : '0');
     } else if (Context != ContextNormal && Ty->getPrimitiveSizeInBits() <= 64 &&
                ActiveBits < Ty->getPrimitiveSizeInBits()) {
-      //if (ActiveBits >= 32)
-      //  Out << "INT64_C(";
+      // if (ActiveBits >= 32)
+      //   Out << "INT64_C(";
       Out << CI->getSExtValue(); // most likely a shorter representation
-      //if (ActiveBits >= 32)
-      //  Out << ")";
+      // if (ActiveBits >= 32)
+      //   Out << ")";
     } else if (Ty->getPrimitiveSizeInBits() < 32 && Context == ContextNormal) {
       Out << "((";
       printSimpleType(Out, Ty, false) << ')';
       Out << CI->getSExtValue();
       Out << ')';
     } else if (Ty->getPrimitiveSizeInBits() <= 32) {
-      //Out << CI->getZExtValue() << 'u';
+      // Out << CI->getZExtValue() << 'u';
       Out << CI->getSExtValue();
     } else if (Ty->getPrimitiveSizeInBits() <= 64) {
-      //Out << CI->getZExtValue();
+      // Out << CI->getZExtValue();
       Out << CI->getSExtValue();
     } else if (Ty->getPrimitiveSizeInBits() <= 128) {
       headerUseInt128();
@@ -3181,7 +3269,7 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
       Context = ContextCasted;
     } else {
       Out << "{ "; // Arrays are wrapped in struct types.
-      //SUSAN: not wrapped in struct any more
+      // SUSAN: not wrapped in struct any more
     }
     if (ConstantArray *CA = dyn_cast<ConstantArray>(CPV)) {
       printConstantArray(CA, Context);
@@ -3385,13 +3473,13 @@ void CWriter::printConstantWithCast(Constant *CPV, unsigned Opcode) {
     printConstant(CPV, ContextCasted);
 }
 
-std::string demangleFunctionName(std::string str){
+std::string demangleFunctionName(std::string str) {
   std::string FuncName = demangle(str);
 
   return FuncName.substr(0, FuncName.find("("));
 }
 
-std::string demangleVariableName(std::string var){
+std::string demangleVariableName(std::string var) {
   SmallVector<std::string, 16> splitedStrs;
 
   std::string VarName;
@@ -3410,65 +3498,65 @@ std::string demangleVariableName(std::string var){
   return VarName;
 }
 std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
-  if(isDeclaration){
+  if (isDeclaration) {
     errs() << "SUSAN: declaring 3252: " << *Operand << "\n";
     cnt_totalVariables++;
   }
 
-  if(Operand->getName() == "xmalloc")
+  if (Operand->getName() == "xmalloc")
     return "malloc";
 
-  if(!Operand) return "";
-  if(IV2Name.find(Operand) != IV2Name.end()){
-    bool foundSourceName= false;
-    for(auto inst2var : IRNaming){
-      if(inst2var.first == Operand){
+  if (!Operand)
+    return "";
+  if (IV2Name.find(Operand) != IV2Name.end()) {
+    bool foundSourceName = false;
+    for (auto inst2var : IRNaming) {
+      if (inst2var.first == Operand) {
         foundSourceName = true;
         break;
       }
     }
-    if(!foundSourceName){
+    if (!foundSourceName) {
       errs() << "SUSAN: found in IV2Name map " << *Operand << "\n";
       errs() << "name:  " << IV2Name[Operand] << "\n";
-      if(isDeclaration){
-        errs() << "SUSAN: reconstructed variable counter increment for iv:" << IV2Name[Operand] << "\n";
+      if (isDeclaration) {
+        errs() << "SUSAN: reconstructed variable counter increment for iv:"
+               << IV2Name[Operand] << "\n";
         cnt_reconstructedVariables++;
       }
       return IV2Name[Operand];
     }
   }
   errs() << "SUSAN: getting value name for: " << *Operand << "\n";
-  //SUSAN: variable names associated with phi will be replaced by phi
-  if(TruncInst *inst = dyn_cast<TruncInst>(Operand))
+  // SUSAN: variable names associated with phi will be replaced by phi
+  if (TruncInst *inst = dyn_cast<TruncInst>(Operand))
     return GetValueName(inst->getOperand(0));
 
-  if(Instruction* inst = dyn_cast<Instruction>(Operand))
-    if(deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()){
+  if (Instruction *inst = dyn_cast<Instruction>(Operand))
+    if (deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()) {
       return GetValueName(deleteAndReplaceInsts[inst]);
     }
 
-
-
-  if(inlinedArgNames.find(Operand) != inlinedArgNames.end())
+  if (inlinedArgNames.find(Operand) != inlinedArgNames.end())
     return inlinedArgNames[Operand];
 
-  //SUSAN: where the vairable names are printed
-  for(auto inst2var : IRNaming)
-    if(inst2var.first == Operand){
+  // SUSAN: where the vairable names are printed
+  for (auto inst2var : IRNaming)
+    if (inst2var.first == Operand) {
       errs() << "inst from IRNaming: " << *inst2var.first << "\n";
       errs() << "original name : " << inst2var.second << "\n";
       std::string var = demangleVariableName(inst2var.second);
       errs() << "returning name: " << var << "\n";
-      if(isDeclaration){
-        errs() << "SUSAN: declaring with reconstructed name 3286: " << var << "\n";
+      if (isDeclaration) {
+        errs() << "SUSAN: declaring with reconstructed name 3286: " << var
+               << "\n";
         cnt_reconstructedVariables++;
       }
       return var;
     }
-  //for (auto const& [var, insts] : Var2IRs)
-    //for (auto &inst : insts)
-      //if(inst == operandInst) return var;
-
+  // for (auto const& [var, insts] : Var2IRs)
+  // for (auto &inst : insts)
+  // if(inst == operandInst) return var;
 
   // Resolve potential alias.
   if (GlobalAlias *GA = dyn_cast<GlobalAlias>(Operand)) {
@@ -3476,8 +3564,8 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
   }
 
   // use IV name for IVInc
-  //Instruction *incInst = dyn_cast<Instruction>(Operand);
-  //if(IVInc2IV.find(incInst) != IVInc2IV.end())
+  // Instruction *incInst = dyn_cast<Instruction>(Operand);
+  // if(IVInc2IV.find(incInst) != IVInc2IV.end())
   //  return GetValueName(IVInc2IV[incInst]);
 
   // YEBIN : add FIXME prefix to vars with no metadata
@@ -3486,18 +3574,18 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
     unsigned No = AnonValueNumbers.getOrInsert(Operand);
 
     Name = utostr(No);
-    //Name = "_" + utostr(No);
+    // Name = "_" + utostr(No);
     if (!TheModule->getNamedValue(Name)) {
       // Short name for the common case where there's no conflicting global.
       return "__FIXME__" + Name;
     }
 
     Name = "tmp_" + Name;
-    //Name = Name + "_tmp";
+    // Name = Name + "_tmp";
   }
 
   // Mangle globals and also append a FIXME to vars
-  if(isa<GlobalVariable>(Operand)) {
+  if (isa<GlobalVariable>(Operand)) {
     return "__FIXME_GLOBAL__" + CBEMangle(Name);
   }
 
@@ -3521,15 +3609,15 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
       VarName += ch;
   }
 
-  //return "_" + VarName;
+  // return "_" + VarName;
   return "__FIXME__" + VarName;
 }
 
 /// writeInstComputationInline - Emit the computation for the specified
 /// instruction inline, with no destination provided.
 void CWriter::writeInstComputationInline(Instruction &I, bool startExpression) {
-  if(deleteAndReplaceInsts.find(&I) != deleteAndReplaceInsts.end()){
-    if(deleteAndReplaceInsts[&I]->getName() == "stderr"){
+  if (deleteAndReplaceInsts.find(&I) != deleteAndReplaceInsts.end()) {
+    if (deleteAndReplaceInsts[&I]->getName() == "stderr") {
       Out << " stderr ";
       return;
     }
@@ -3554,48 +3642,49 @@ void CWriter::writeInstComputationInline(Instruction &I, bool startExpression) {
   // a 1 bit value.  This is important because we want "add i1 x, y" to return
   // "0" when x and y are true, not "2" for example.
   // Also truncate odd bit sizes
-  //if (mask)
-    //Out << "((";
+  // if (mask)
+  // Out << "((";
 
   visit(&I);
 
-  //if (mask)
-    //Out << ")&" << mask << ")";
+  // if (mask)
+  // Out << ")&" << mask << ")";
 }
 
-void CWriter::writeOperandInternal(Value *Operand,
-                                   enum OperandContext Context, bool startExpression) {
-  if(PHINode *phi = dyn_cast<PHINode>(Operand)){
-    if(LoadInst* ld = dyn_cast<LoadInst>(phi->getIncomingValue(0)))
-      if(ld->getPointerOperand()->getName() == "stderr"){
+void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
+                                   bool startExpression) {
+  if (PHINode *phi = dyn_cast<PHINode>(Operand)) {
+    if (LoadInst *ld = dyn_cast<LoadInst>(phi->getIncomingValue(0)))
+      if (ld->getPointerOperand()->getName() == "stderr") {
         Out << "stderr";
         return;
       }
   }
 
-  if(inlinedArgNames.find(Operand) != inlinedArgNames.end()){
-    errs() << "SUSAN: returning inlined name 3339: " << inlinedArgNames[Operand];
+  if (inlinedArgNames.find(Operand) != inlinedArgNames.end()) {
+    errs() << "SUSAN: returning inlined name 3339: "
+           << inlinedArgNames[Operand];
     errs() << "SUSAN: operand: " << *Operand << "\n";
     bool printDouble = false;
-    if(valuesCast2Double.find(Operand) != valuesCast2Double.end()){
+    if (valuesCast2Double.find(Operand) != valuesCast2Double.end()) {
       printDouble = true;
-      for(auto [ld, object] : doubleGeps)
-        if(object == Operand){
+      for (auto [ld, object] : doubleGeps)
+        if (object == Operand) {
           printDouble = false;
           break;
         }
     }
-    if(printDouble)
+    if (printDouble)
       Out << "((double*)";
     Out << inlinedArgNames[Operand];
-    if(printDouble)
+    if (printDouble)
       Out << ")";
     return;
   }
 
   Instruction *inst = dyn_cast<Instruction>(Operand);
-  if(inst && deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()){
-    if(deleteAndReplaceInsts[inst]->getName() == "stderr"){
+  if (inst && deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()) {
+    if (deleteAndReplaceInsts[inst]->getName() == "stderr") {
       Out << " stderr ";
       return;
     }
@@ -3603,49 +3692,48 @@ void CWriter::writeOperandInternal(Value *Operand,
     return;
   }
 
-  if(isExtraInductionVariable(Operand)){
+  if (isExtraInductionVariable(Operand)) {
     PHINode *phi = dyn_cast<PHINode>(Operand);
-    for(auto [iv, relatedIVs] : IVMap)
-      if(relatedIVs.find(phi) != relatedIVs.end()){
+    for (auto [iv, relatedIVs] : IVMap)
+      if (relatedIVs.find(phi) != relatedIVs.end()) {
         writeOperandInternal(iv);
 
         Value *offset = nullptr;
-        for(auto LP : LoopProfiles){
-          if(LP->IV == iv){
-            if(!LP->lbAlloca || !LP->incr) break;
+        for (auto LP : LoopProfiles) {
+          if (LP->IV == iv) {
+            if (!LP->lbAlloca || !LP->incr)
+              break;
             errs() << "SUSAN: main IV's lb: " << *LP->lb << "\n";
             errs() << "SUSAN: main IV's lballoca: " << *LP->lbAlloca << "\n";
             errs() << "SUSAN: main IV's incr: " << *LP->incr << "\n";
 
-
-
             Value *initVal = nullptr;
             Instruction *incrementInst = nullptr;
-            for(unsigned i=0; i<phi->getNumIncomingValues(); ++i){
+            for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
               BasicBlock *predBB = phi->getIncomingBlock(i);
-              if(LI->getLoopFor(predBB) != LP->L)
+              if (LI->getLoopFor(predBB) != LP->L)
                 initVal = phi->getIncomingValue(i);
               else
                 incrementInst = dyn_cast<Instruction>(phi->getIncomingValue(i));
             }
 
-
-            //check if IV steps are the same
-            if(incrementInst->getOperand(1) != LP->incr) break;
+            // check if IV steps are the same
+            if (incrementInst->getOperand(1) != LP->incr)
+              break;
             assert(initVal && "relatedIV doesn't have initVal??\n");
 
             errs() << "SUSAN: relatedIV's init val: " << *initVal << "\n";
-            if(BinaryOperator *binOp = dyn_cast<BinaryOperator>(initVal)){
-              Value* opnd0 = binOp->getOperand(0);
+            if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(initVal)) {
+              Value *opnd0 = binOp->getOperand(0);
               opnd0 = findOriginalValue(opnd0);
               errs() << "SUSAN: relatedIV original opnd0: " << *opnd0 << "\n";
-              if(opnd0 == LP->lbAlloca)
+              if (opnd0 == LP->lbAlloca)
                 offset = binOp->getOperand(1);
             }
           }
         }
 
-        if(offset)
+        if (offset)
           writeOperandInternal(offset);
         return;
       }
@@ -3654,32 +3742,31 @@ void CWriter::writeOperandInternal(Value *Operand,
   if (Instruction *I = dyn_cast<Instruction>(Operand))
     // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
-      if(isa<LoadInst>(I) && addParenthesis.find(I) != addParenthesis.end())
+      if (isa<LoadInst>(I) && addParenthesis.find(I) != addParenthesis.end())
         Out << '(';
       writeInstComputationInline(*I, startExpression);
-      if(isa<LoadInst>(I) && addParenthesis.find(I) != addParenthesis.end())
+      if (isa<LoadInst>(I) && addParenthesis.find(I) != addParenthesis.end())
         Out << ')';
       return;
     }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
 
-  if (CPV && !isa<GlobalValue>(CPV)){
+  if (CPV && !isa<GlobalValue>(CPV)) {
     printConstant(CPV, Context);
-  }
-  else {
-    if(isa<Function>(Operand)) {
+  } else {
+    if (isa<Function>(Operand)) {
       Out << demangleFunctionName(GetValueName(Operand));
-    }
-    else
+    } else
       Out << GetValueName(Operand);
   }
 }
 
-void CWriter::writeOperand(Value *Operand, enum OperandContext Context, bool startExpression) {
+void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
+                           bool startExpression) {
   errs() << "CBackend: writeOperand 3595: " << *Operand << "\n";
-  if(LoadInst* ld = dyn_cast<LoadInst>(Operand))
-    if(ld->getPointerOperand()->getName() == "stderr"){
+  if (LoadInst *ld = dyn_cast<LoadInst>(Operand))
+    if (ld->getPointerOperand()->getName() == "stderr") {
       Out << "stderr";
       return;
     }
@@ -3689,31 +3776,32 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context, bool sta
       return;
     }
   }*/
-  if(inlinedArgNames.find(Operand) != inlinedArgNames.end()){
-    errs() << "SUSAN: returning inlined name 3426: " << inlinedArgNames[Operand];
+  if (inlinedArgNames.find(Operand) != inlinedArgNames.end()) {
+    errs() << "SUSAN: returning inlined name 3426: "
+           << inlinedArgNames[Operand];
     bool printDouble = false;
-    if(valuesCast2Double.find(Operand) != valuesCast2Double.end()){
+    if (valuesCast2Double.find(Operand) != valuesCast2Double.end()) {
       printDouble = true;
-      for(auto [ld, object] : doubleGeps)
-        if(object == Operand){
+      for (auto [ld, object] : doubleGeps)
+        if (object == Operand) {
           printDouble = false;
           break;
         }
     }
-    if(printDouble)
+    if (printDouble)
       Out << "(double*)";
     Out << inlinedArgNames[Operand];
     return;
   }
 
-  if(InstsToReplaceByPhi.find(Operand) != InstsToReplaceByPhi.end()){
+  if (InstsToReplaceByPhi.find(Operand) != InstsToReplaceByPhi.end()) {
     writeOperand(InstsToReplaceByPhi[Operand]);
     return;
   }
 
   Instruction *inst = dyn_cast<Instruction>(Operand);
-  if(inst && deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()){
-    if(deleteAndReplaceInsts[inst]->getName() == "stderr"){
+  if (inst && deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()) {
+    if (deleteAndReplaceInsts[inst]->getName() == "stderr") {
       Out << " stderr ";
       return;
     }
@@ -3733,26 +3821,26 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context, bool sta
       Out << "((void*)&";
   }
 
-
   bool isOmpLoop = false;
   LoopProfile *LP = nullptr;
-  for(auto lp : LoopProfiles)
-    if(CurLoop && lp->L == CurLoop && lp->isOmpLoop){
+  for (auto lp : LoopProfiles)
+    if (CurLoop && lp->L == CurLoop && lp->isOmpLoop) {
       isOmpLoop = true;
       LP = lp;
       break;
     }
 
-  if(isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate)
+  if (isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate)
     Out << "(";
 
-  if(isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate && isOmpLoop)
+  if (isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) &&
+      !omp_declarePrivate && isOmpLoop)
     writeOperandInternal(LP->IV, Context, startExpression);
   else
     writeOperandInternal(Operand, Context, startExpression);
 
-  if(isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate)
-      Out << " + 1)";
+  if (isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate)
+    Out << " + 1)";
 
   if (isAddressImplicit)
     Out << ')';
@@ -3846,7 +3934,8 @@ void CWriter::opcodeNeedsCast(
   }
 }
 
-void CWriter::writeOperandWithCast(Value *Operand, unsigned Opcode, bool startExpression) {
+void CWriter::writeOperandWithCast(Value *Operand, unsigned Opcode,
+                                   bool startExpression) {
   // Write out the casted operand if we should, otherwise just write the
   // operand.
 
@@ -4335,7 +4424,8 @@ bool CWriter::doInitialization(Module &M) {
   TAsm = new CBEMCAsmInfo();
   MRI = new MCRegisterInfo();
 #if LLVM_VERSION_MAJOR > 12
-  TCtx = new MCContext(llvm::Triple(TheModule->getTargetTriple()),TAsm, MRI, nullptr);
+  TCtx = new MCContext(llvm::Triple(TheModule->getTargetTriple()), TAsm, MRI,
+                       nullptr);
 #else
   TCtx = new MCContext(TAsm, MRI, nullptr);
 #endif
@@ -4388,20 +4478,22 @@ bool CWriter::doFinalization(Module &M) {
   return true; // may have lowered an IntrinsicCall
 }
 
-void CWriter::findOMPFunctions(Module &M){
+void CWriter::findOMPFunctions(Module &M) {
   /*
    * OpenMP: search for openmp functions
    */
   for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
     Function *F = &*FI;
-    for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I){
+    for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
       CallInst *callInst = dyn_cast<CallInst>(&*I);
-      if(!callInst) continue;
-      if(Function *F = callInst->getCalledFunction()){
-        if(F->getName() == "__kmpc_fork_call"){
-          ConstantExpr* utaskCast = dyn_cast<ConstantExpr>(callInst->getArgOperand(2));
-          Function* utask;
-          if(utaskCast && utaskCast->isCast())
+      if (!callInst)
+        continue;
+      if (Function *F = callInst->getCalledFunction()) {
+        if (F->getName() == "__kmpc_fork_call") {
+          ConstantExpr *utaskCast =
+              dyn_cast<ConstantExpr>(callInst->getArgOperand(2));
+          Function *utask;
+          if (utaskCast && utaskCast->isCast())
             utask = dyn_cast<Function>(utaskCast->getOperand(0));
           else
             utask = dyn_cast<Function>(callInst->getArgOperand(2));
@@ -4413,57 +4505,60 @@ void CWriter::findOMPFunctions(Module &M){
     }
   }
 
-  //delete argInput in a struct
-  for(auto [callInst, utask] : ompFuncs){
-    int numArgs = std::distance(utask->arg_begin(), utask->arg_end())-2;
-    for(auto idx = 3; idx < numArgs+3; ++idx) {
+  // delete argInput in a struct
+  for (auto [callInst, utask] : ompFuncs) {
+    int numArgs = std::distance(utask->arg_begin(), utask->arg_end()) - 2;
+    for (auto idx = 3; idx < numArgs + 3; ++idx) {
       Value *argInput = callInst->getArgOperand(idx);
-      //Value *arg = utask->getArg(idx-1);
-      //Hailong Jiang 03/23/2023
-      Value *arg = utask->arg_begin()+(idx-1);
-      PointerType* ty = dyn_cast<PointerType>(arg->getType());
-      if(ty)
+      // Value *arg = utask->getArg(idx-1);
+      // Hailong Jiang 03/23/2023
+      Value *arg = utask->arg_begin() + (idx - 1);
+      PointerType *ty = dyn_cast<PointerType>(arg->getType());
+      if (ty)
         type2declare[argInput] = ty->getPointerElementType();
 
       errs() << "SUSAN: argInput 4158: " << *argInput << "\n";
       errs() << "SUSAN: arg 4158: " << *arg << "\n";
-      PointerType* ptrTy = dyn_cast<PointerType>(argInput->getType());
-      if(ptrTy && isa<StructType>(ptrTy->getPointerElementType())){
-        for(auto U : argInput->users()){
-          GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(U);
-          if(!gep) continue;
+      PointerType *ptrTy = dyn_cast<PointerType>(argInput->getType());
+      if (ptrTy && isa<StructType>(ptrTy->getPointerElementType())) {
+        for (auto U : argInput->users()) {
+          GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(U);
+          if (!gep)
+            continue;
           ConstantInt *constint = dyn_cast<ConstantInt>(gep->getOperand(2));
 
-          for(auto storeU : gep->users()){
-            if(StoreInst *store = dyn_cast<StoreInst>(storeU)){
-              errs() << "SUSAN: found store for struct 9066: " << *store << "\n";
-              if(isa<AllocaInst>(store->getOperand(0)))
-                for(auto user : store->getOperand(0)->users())
-                  if(StoreInst *storeAlloca = dyn_cast<StoreInst>(user))
-                    if(storeAlloca->getPointerOperand() == store->getOperand(0))
+          for (auto storeU : gep->users()) {
+            if (StoreInst *store = dyn_cast<StoreInst>(storeU)) {
+              errs() << "SUSAN: found store for struct 9066: " << *store
+                     << "\n";
+              if (isa<AllocaInst>(store->getOperand(0)))
+                for (auto user : store->getOperand(0)->users())
+                  if (StoreInst *storeAlloca = dyn_cast<StoreInst>(user))
+                    if (storeAlloca->getPointerOperand() ==
+                        store->getOperand(0))
                       deadInsts.insert(storeAlloca);
               deadInsts.insert(store);
-            }
-            else if(CastInst *cast = dyn_cast<CastInst>(storeU)){
-              for(auto storeU : cast->users()){
+            } else if (CastInst *cast = dyn_cast<CastInst>(storeU)) {
+              for (auto storeU : cast->users()) {
                 StoreInst *store = dyn_cast<StoreInst>(storeU);
-                if(!store) continue;
-                errs() << "SUSAN: found store for struct 9095: " << *store << "\n";
+                if (!store)
+                  continue;
+                errs() << "SUSAN: found store for struct 9095: " << *store
+                       << "\n";
                 deadInsts.insert(store);
               }
             }
           }
         }
       } else {
-          if(auto alloca = isDirectAlloca(argInput))
-            for(auto user : alloca->users())
-              if(StoreInst *store = dyn_cast<StoreInst>(user))
-                if(store->getPointerOperand() == alloca)
-                  deadInsts.insert(store);
+        if (auto alloca = isDirectAlloca(argInput))
+          for (auto user : alloca->users())
+            if (StoreInst *store = dyn_cast<StoreInst>(user))
+              if (store->getPointerOperand() == alloca)
+                deadInsts.insert(store);
       }
     }
   }
-
 }
 
 void CWriter::generateHeader(Module &M) {
@@ -4495,7 +4590,7 @@ void CWriter::generateHeader(Module &M) {
   // Support for integers with explicit sizes. This one isn't conditional
   // because virtually all CBE output will use it.
   OutHeaders << "#include <stdint.h>\n"; // Sized integer support
-  OutHeaders << "#include <stdio.h>\n"; //
+  OutHeaders << "#include <stdio.h>\n";  //
   OutHeaders << "#include <stdlib.h>\n";
   OutHeaders << "#include <string.h>\n";
   OutHeaders << "#include <math.h>\n";
@@ -4541,11 +4636,11 @@ void CWriter::generateHeader(Module &M) {
     printTypeName(NullOut, I->getType()->getElementType(), false);
   }
 
-  //collect function types that are arguments in the standard library calls
+  // collect function types that are arguments in the standard library calls
   for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
-    Function* func = &*I;
-    std::pair<AttributeList, CallingConv::ID> Attrs = std::make_pair(func->getAttributes(),
-                                                  func->getCallingConv());
+    Function *func = &*I;
+    std::pair<AttributeList, CallingConv::ID> Attrs =
+        std::make_pair(func->getAttributes(), func->getCallingConv());
     AttributeList &PAL = Attrs.first;
     FunctionType *FTy = func->getFunctionType();
     bool isStructReturn = false;
@@ -4562,31 +4657,28 @@ void CWriter::generateHeader(Module &M) {
     }
 
     // add return type to functionIDs if it's function type;
-    if(RetTy->getTypeID() == Type::FunctionTyID){
+    if (RetTy->getTypeID() == Type::FunctionTyID) {
       FunctionType *FTy = cast<FunctionType>(RetTy);
       UnnamedFunctionIDs.getOrInsert(std::make_pair(FTy, Attrs));
     }
-
 
     // Get the argument types
     FunctionType::param_iterator II = FTy->param_begin(), EE = FTy->param_end();
     for (; II != EE; ++II) {
       Type *ArgTy = *II;
       // add argument type to functionIDs if it's function type;
-      if(ArgTy->getTypeID() == Type::FunctionTyID){
+      if (ArgTy->getTypeID() == Type::FunctionTyID) {
         FunctionType *FTy = cast<FunctionType>(ArgTy);
         UnnamedFunctionIDs.getOrInsert(std::make_pair(FTy, Attrs));
-      }
-      else if(ArgTy->getTypeID() == Type::PointerTyID){
+      } else if (ArgTy->getTypeID() == Type::PointerTyID) {
         Type *ElTy = ArgTy->getPointerElementType();
-        if(FunctionType *FTy = dyn_cast<FunctionType>(ElTy)){
-          std::pair<AttributeList, CallingConv::ID> PAL_generic = std::make_pair(AttributeList(),
-                                                  CallingConv::C);
+        if (FunctionType *FTy = dyn_cast<FunctionType>(ElTy)) {
+          std::pair<AttributeList, CallingConv::ID> PAL_generic =
+              std::make_pair(AttributeList(), CallingConv::C);
           UnnamedFunctionIDs.getOrInsert(std::make_pair(FTy, PAL_generic));
         }
       }
     }
-
   }
 
   printModuleTypes(Out);
@@ -4599,7 +4691,8 @@ void CWriter::generateHeader(Module &M) {
       if (!I->isDeclaration())
         continue;
 
-      if(I->getName() == "stderr") continue;
+      if (I->getName() == "stderr")
+        continue;
       if (I->hasDLLImportStorageClass())
         Out << "__declspec(dllimport) ";
       else if (I->hasDLLExportStorageClass())
@@ -4648,29 +4741,48 @@ void CWriter::generateHeader(Module &M) {
     /*
      * OpenMP: skip declaring kmpc functions
      */
-    if((&*I)->getName().contains("__kmpc")) continue;
-    if((&*I)->getName().contains("free")) continue;
-    if((&*I)->getName().contains("strtol")) continue;
-    if((&*I)->getName().contains("fprintf")) continue;
-    if((&*I)->getName().contains("atoll")) continue;
-    if((&*I)->getName().contains("calloc")) continue;
-    if((&*I)->getName().contains("puts")) continue;
-    //Hailong Jiang 04/04/2023
-    if((&*I)->getName().contains("printf")) continue;
-    if((&*I)->getName().contains("fputc")) continue;
-    if((&*I)->getName().contains("malloc")) continue;
-    if((&*I)->getName().contains("posix_memalign")) continue;
-    if((&*I)->getName().contains("fwrite")) continue;
-    if((&*I)->getName().contains("exit")) continue;
-    if((&*I)->getName().contains("atoi")) continue;
-    if((&*I)->getName().contains("rand")) continue;
-    if((&*I)->getName().contains("fopen")) continue;
-    if((&*I)->getName().contains("fgetc")) continue;
-    if((&*I)->getName().contains("fclose")) continue;
-    if((&*I)->getName().contains("memcpy")) continue;
-    //if((&*I)->getName().contains("xmalloc")) continue;
-    // Don't print declarations for intrinsic functions.
-    // Store the used intrinsics, which need to be explicitly defined.
+    if ((&*I)->getName().contains("__kmpc"))
+      continue;
+    if ((&*I)->getName().contains("free"))
+      continue;
+    if ((&*I)->getName().contains("strtol"))
+      continue;
+    if ((&*I)->getName().contains("fprintf"))
+      continue;
+    if ((&*I)->getName().contains("atoll"))
+      continue;
+    if ((&*I)->getName().contains("calloc"))
+      continue;
+    if ((&*I)->getName().contains("puts"))
+      continue;
+    // Hailong Jiang 04/04/2023
+    if ((&*I)->getName().contains("printf"))
+      continue;
+    if ((&*I)->getName().contains("fputc"))
+      continue;
+    if ((&*I)->getName().contains("malloc"))
+      continue;
+    if ((&*I)->getName().contains("posix_memalign"))
+      continue;
+    if ((&*I)->getName().contains("fwrite"))
+      continue;
+    if ((&*I)->getName().contains("exit"))
+      continue;
+    if ((&*I)->getName().contains("atoi"))
+      continue;
+    if ((&*I)->getName().contains("rand"))
+      continue;
+    if ((&*I)->getName().contains("fopen"))
+      continue;
+    if ((&*I)->getName().contains("fgetc"))
+      continue;
+    if ((&*I)->getName().contains("fclose"))
+      continue;
+    if ((&*I)->getName().contains("memcpy"))
+      continue;
+    // if((&*I)->getName().contains("xmalloc")) continue;
+    //  Don't print declarations for intrinsic functions.
+    //  Store the used intrinsics, which need to be explicitly defined.
     if (I->isIntrinsic()) {
       switch (I->getIntrinsicID()) {
       default:
@@ -4722,8 +4834,8 @@ void CWriter::generateHeader(Module &M) {
     else if (I->hasDLLExportStorageClass())
       Out << "__declspec(dllexport) ";
 
-    //if (I->hasLocalLinkage())
-    //  Out << "static ";
+    // if (I->hasLocalLinkage())
+    //   Out << "static ";
     if (I->hasExternalWeakLinkage())
       Out << "extern ";
 
@@ -4731,18 +4843,18 @@ void CWriter::generateHeader(Module &M) {
      * OpenMP: declare outlined functions
      */
     bool printedOmpDec = false;
-    std::set<Function*> printedFunction;
-    for(auto [call, utask] : ompFuncs)
-      if(&*I == utask && printedFunction.find(utask) == printedFunction.end()){
+    std::set<Function *> printedFunction;
+    for (auto [call, utask] : ompFuncs)
+      if (&*I == utask &&
+          printedFunction.find(utask) == printedFunction.end()) {
         printedFunction.insert(utask);
         printFunctionProto(Out, &*I, 2);
         printedOmpDec = true;
       }
 
-    if(!printedOmpDec) {
+    if (!printedOmpDec) {
       printFunctionProto(Out, &*I);
     }
-
 
     printFunctionAttributes(Out, I->getAttributes());
     if (I->hasWeakLinkage() || I->hasLinkOnceLinkage()) {
@@ -4768,55 +4880,57 @@ void CWriter::generateHeader(Module &M) {
     Out << ";\n";
   }
 
-
   // Output the global variable definitions and contents...
   if (!M.global_empty()) {
     Out << "\n\n/* Global Variable Definitions and Initialization */\n";
 
-    // SUSAN: globals can be out of order in llvm IR, for example, the following is legal:
-    // @tree.sdown = internal global i8* getelementptr inbounds ([4 x i8], [4 x i8]* @.str, i32 0, i32 0), align 8, !dbg !0
+    // SUSAN: globals can be out of order in llvm IR, for example, the following
+    // is legal:
+    // @tree.sdown = internal global i8* getelementptr inbounds ([4 x i8], [4 x
+    // i8]* @.str, i32 0, i32 0), align 8, !dbg !0
     // @.str = private unnamed_addr constant [4 x i8] c"  |\00", align 1
     // Therefore code can't be produced in llvm order
     //
-    //for (Module::global_iterator I = M.global_begin(), E = M.global_end();
+    // for (Module::global_iterator I = M.global_begin(), E = M.global_end();
     //     I != E; ++I) {
     //  GlobalVariable* inst = &*I;
     //  errs() << "SUSAN: global variable: " << *inst << "\n";
     //  declareOneGlobalVariable(&*I);
     //}
     //
-    std::set<GlobalVariable*> declared;
-    std::queue<GlobalVariable*> workingList;
+    std::set<GlobalVariable *> declared;
+    std::queue<GlobalVariable *> workingList;
     for (Module::global_iterator I = M.global_begin(), E = M.global_end();
          I != E; ++I) {
-      GlobalVariable* glob = &*I;
+      GlobalVariable *glob = &*I;
       workingList.push(glob);
     }
 
-    while(!workingList.empty()){
+    while (!workingList.empty()) {
       bool isReady2Declare = true;
       GlobalVariable *currGlob = workingList.front();
       errs() << "SUSAN: currGlob: " << *currGlob << "\n";
       workingList.pop();
 
-      if(currGlob->hasInitializer()){
+      if (currGlob->hasInitializer()) {
         Constant *initializer = currGlob->getInitializer();
-        if(ConstantExpr *initializerExpr = dyn_cast<ConstantExpr>(initializer))
-          if(GEPOperator *initializerOp = dyn_cast<GEPOperator>(initializerExpr) ){
+        if (ConstantExpr *initializerExpr = dyn_cast<ConstantExpr>(initializer))
+          if (GEPOperator *initializerOp =
+                  dyn_cast<GEPOperator>(initializerExpr)) {
             Value *v = initializerOp->getPointerOperand();
-            if( GlobalVariable *useGlob = dyn_cast<GlobalVariable>(v) )
-              if (declared.find(useGlob) == declared.end()){
+            if (GlobalVariable *useGlob = dyn_cast<GlobalVariable>(v))
+              if (declared.find(useGlob) == declared.end()) {
                 workingList.push(currGlob);
                 isReady2Declare = false;
               }
           }
 
-        if(ConstantArray *initArr = dyn_cast<ConstantArray>(initializer)){
+        if (ConstantArray *initArr = dyn_cast<ConstantArray>(initializer)) {
           for (Value *Element : initArr->operands())
-            if(GEPOperator *initializerOp = dyn_cast<GEPOperator>(Element) ){
+            if (GEPOperator *initializerOp = dyn_cast<GEPOperator>(Element)) {
               Value *v = initializerOp->getPointerOperand();
-              if(GlobalVariable *globElement = dyn_cast<GlobalVariable>(v))
-                if(declared.find(globElement) == declared.end()){
+              if (GlobalVariable *globElement = dyn_cast<GlobalVariable>(v))
+                if (declared.find(globElement) == declared.end()) {
                   workingList.push(currGlob);
                   isReady2Declare = false;
                   break;
@@ -4824,12 +4938,13 @@ void CWriter::generateHeader(Module &M) {
             }
         }
 
-        if(ConstantStruct *initStruct = dyn_cast<ConstantStruct>(initializer)){
+        if (ConstantStruct *initStruct =
+                dyn_cast<ConstantStruct>(initializer)) {
           for (Value *Element : initStruct->operands())
-            if(GEPOperator *initializerOp = dyn_cast<GEPOperator>(Element) ){
+            if (GEPOperator *initializerOp = dyn_cast<GEPOperator>(Element)) {
               Value *v = initializerOp->getPointerOperand();
-              if(GlobalVariable *globElement = dyn_cast<GlobalVariable>(v))
-                if(declared.find(globElement) == declared.end()){
+              if (GlobalVariable *globElement = dyn_cast<GlobalVariable>(v))
+                if (declared.find(globElement) == declared.end()) {
                   workingList.push(currGlob);
                   isReady2Declare = false;
                   break;
@@ -4838,11 +4953,9 @@ void CWriter::generateHeader(Module &M) {
         }
       }
 
-
-
-      if(isReady2Declare){
-          declareOneGlobalVariable(currGlob);
-          declared.insert(currGlob);
+      if (isReady2Declare) {
+        declareOneGlobalVariable(currGlob);
+        declared.insert(currGlob);
       }
     }
   }
@@ -4854,8 +4967,8 @@ void CWriter::generateHeader(Module &M) {
          ++I) {
       cwriter_assert(!I->isDeclaration() &&
                      !isEmptyType(I->getType()->getPointerElementType()));
-      //if (I->hasLocalLinkage())
-      //  continue; // Internal Global
+      // if (I->hasLocalLinkage())
+      //   continue; // Internal Global
 
       if (I->hasDLLImportStorageClass())
         Out << "__declspec(dllimport) ";
@@ -4968,7 +5081,8 @@ void CWriter::generateHeader(Module &M) {
     unsigned n, l = NumberOfElements((*it).second);
     VectorType *RTy =
 #if LLVM_VERSION_MAJOR >= 12
-        VectorType::get(Type::getInt1Ty((*it).second->getContext()), l,(*it).second->getElementCount().isScalar());
+        VectorType::get(Type::getInt1Ty((*it).second->getContext()), l,
+                        (*it).second->getElementCount().isScalar());
 #else
         VectorType::get(Type::getInt1Ty((*it).second->getContext()), l);
 #endif
@@ -5521,9 +5635,9 @@ void CWriter::generateHeader(Module &M) {
     StructType *STy = dyn_cast<StructType>(*it);
     ArrayType *ATy = dyn_cast<ArrayType>(*it);
     VectorType *VTy = dyn_cast<VectorType>(*it);
-    //errs() << "SUSAN: STy: " << *STy << "\n";
-    //errs() << "SUSAN: ATy: " << *ATy << "\n";
-    //errs() << "SUSAN: VTy: " << *VTy << "\n";
+    // errs() << "SUSAN: STy: " << *STy << "\n";
+    // errs() << "SUSAN: ATy: " << *ATy << "\n";
+    // errs() << "SUSAN: VTy: " << *VTy << "\n";
     unsigned e = (STy ? STy->getNumElements()
                       : (ATy ? ATy->getNumElements() : NumberOfElements(VTy)));
     bool printed = false;
@@ -5603,44 +5717,44 @@ void CWriter::declareOneGlobalVariable(GlobalVariable *I) {
   else if (I->hasDLLExportStorageClass())
     Out << "__declspec(dllexport) ";
 
-  //if (I->hasLocalLinkage())
-  //  Out << "static ";
+  // if (I->hasLocalLinkage())
+  //   Out << "static ";
 
   // Thread Local Storage
   if (I->isThreadLocal())
     Out << "__thread ";
 
   Type *ElTy = I->getType()->getElementType();
- // unsigned Alignment = I->getAlignment();
- // bool IsOveraligned = Alignment && Alignment > TD->getABITypeAlignment(ElTy);
- // if (IsOveraligned) {
- //   headerUseMsAlign();
- //   Out << "__MSALIGN__(" << Alignment << ") ";
- // }
- // printTypeNameForAddressableValue(Out, ElTy, false);
- // Out << ' ' << GetValueName(I);
- // if (IsOveraligned)
- //   Out << " __attribute__((aligned(" << Alignment << ")))";
+  // unsigned Alignment = I->getAlignment();
+  // bool IsOveraligned = Alignment && Alignment >
+  // TD->getABITypeAlignment(ElTy); if (IsOveraligned) {
+  //   headerUseMsAlign();
+  //   Out << "__MSALIGN__(" << Alignment << ") ";
+  // }
+  // printTypeNameForAddressableValue(Out, ElTy, false);
+  // Out << ' ' << GetValueName(I);
+  // if (IsOveraligned)
+  //   Out << " __attribute__((aligned(" << Alignment << ")))";
 
- // if (I->hasLinkOnceLinkage())
- //   Out << " __attribute__((common))";
- // else if (I->hasWeakLinkage()) {
- //   headerUseAttributeWeak();
- //   Out << " __ATTRIBUTE_WEAK__";
- // } else if (I->hasCommonLinkage()) {
- //   headerUseAttributeWeak();
- //   Out << " __ATTRIBUTE_WEAK__";
- // }
+  // if (I->hasLinkOnceLinkage())
+  //   Out << " __attribute__((common))";
+  // else if (I->hasWeakLinkage()) {
+  //   headerUseAttributeWeak();
+  //   Out << " __ATTRIBUTE_WEAK__";
+  // } else if (I->hasCommonLinkage()) {
+  //   headerUseAttributeWeak();
+  //   Out << " __ATTRIBUTE_WEAK__";
+  // }
 
- // if (I->hasHiddenVisibility()) {
- //   headerUseHidden();
- //   Out << " __HIDDEN__";
- // }
+  // if (I->hasHiddenVisibility()) {
+  //   headerUseHidden();
+  //   Out << " __HIDDEN__";
+  // }
 
   printTypeNameForAddressableValue(Out, ElTy, false);
   Out << ' ' << GetValueName(I);
   ArrayType *ArrTy = dyn_cast<ArrayType>(ElTy);
-  while(ArrTy){
+  while (ArrTy) {
     Out << "[" << ArrTy->getNumElements() << "]";
     ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType());
   }
@@ -5673,181 +5787,181 @@ void CWriter::declareOneGlobalVariable(GlobalVariable *I) {
   Out << ";\n";
 }
 
-void CWriter::markLoopIrregularExits(Function &F){
-  std::list<Loop*> loops( LI->begin(), LI->end() );
-  while( !loops.empty() )
-  {
+void CWriter::markLoopIrregularExits(Function &F) {
+  std::list<Loop *> loops(LI->begin(), LI->end());
+  while (!loops.empty()) {
     Loop *L = loops.front();
     loops.pop_front();
 
-    SmallVector< BasicBlock*, 8> ExitBlocks, ExitingBlocks;
+    SmallVector<BasicBlock *, 8> ExitBlocks, ExitingBlocks;
     SmallVector<std::pair<BasicBlock *, BasicBlock *>, 8> ExitEdges;
     L->getExitBlocks(ExitBlocks);
     L->getExitingBlocks(ExitingBlocks);
     L->getExitEdges(ExitEdges);
-    for(auto edge : ExitEdges){
+    for (auto edge : ExitEdges) {
       BasicBlock *exitingBB = edge.first;
-      if(exitingBB != L->getHeader()){
+      if (exitingBB != L->getHeader()) {
         irregularLoopExits.insert(edge);
       }
     }
 
-    loops.insert(loops.end(), L->getSubLoops().begin(),
-        L->getSubLoops().end());
+    loops.insert(loops.end(), L->getSubLoops().begin(), L->getSubLoops().end());
   }
-
-
 }
 
-Instruction* CWriter::headerIsExiting(Loop *L, bool &negateCondition, BranchInst* brInst){
+Instruction *CWriter::headerIsExiting(Loop *L, bool &negateCondition,
+                                      BranchInst *brInst) {
   errs() << "SUSAN: trying to get exit for loop: " << *L << "\n";
-  if(!brInst){
+  if (!brInst) {
     BasicBlock *header = L->getHeader();
-    Instruction* term = header->getTerminator();
+    Instruction *term = header->getTerminator();
     brInst = dyn_cast<BranchInst>(term);
     assert(brInst && brInst->isConditional() &&
-      "exit condition is not a conditional branch inst?");
+           "exit condition is not a conditional branch inst?");
   }
-  SmallVector< BasicBlock*, 1> ExitingBlocks;
+  SmallVector<BasicBlock *, 1> ExitingBlocks;
   L->getExitingBlocks(ExitingBlocks);
-  for(SmallVector<BasicBlock*,1>::iterator i=ExitingBlocks.begin(), e=ExitingBlocks.end(); i!=e; ++i){
+  for (SmallVector<BasicBlock *, 1>::iterator i = ExitingBlocks.begin(),
+                                              e = ExitingBlocks.end();
+       i != e; ++i) {
     BasicBlock *exit = *i;
-    errs() << "SUSAN exitBB: "  << *exit << "\n";
-    if(exit == L->getHeader()){
+    errs() << "SUSAN exitBB: " << *exit << "\n";
+    if (exit == L->getHeader()) {
       Value *cond = brInst->getCondition();
-      if(isa<CmpInst>(cond) || isa<UnaryInstruction>(cond) || isa<BinaryOperator>(cond) || isa<CallInst>(cond)){
-        if(isa<CallInst>(cond))
+      if (isa<CmpInst>(cond) || isa<UnaryInstruction>(cond) ||
+          isa<BinaryOperator>(cond) || isa<CallInst>(cond)) {
+        if (isa<CallInst>(cond))
           loopCondCalls.insert(dyn_cast<CallInst>(cond));
         BasicBlock *succ0 = brInst->getSuccessor(0);
-        if(LI->getLoopFor(succ0) != L) negateCondition = true;
+        if (LI->getLoopFor(succ0) != L)
+          negateCondition = true;
         return cast<Instruction>(cond);
       }
-      /*else if(isa<CmpInst>(opnd1) || isa<UnaryInstruction>(opnd1) || isa<BinaryOperator>(opnd1) || isa<CallInst>(opnd1)){
+      /*else if(isa<CmpInst>(opnd1) || isa<UnaryInstruction>(opnd1) ||
+      isa<BinaryOperator>(opnd1) || isa<CallInst>(opnd1)){
         if(isa<CallInst>(opnd1))
           loopCondCalls.insert(dyn_cast<CallInst>(opnd1));
         negateCondition = true;
         return cast<Instruction>(opnd1);
       }*/
-      else return nullptr;
+      else
+        return nullptr;
     }
   }
   return nullptr;
 }
 
-bool isPureBranchBB (BasicBlock *BB){
+bool isPureBranchBB(BasicBlock *BB) {
   Instruction *term = BB->getTerminator();
-  std::queue<Instruction*> toVisit;
+  std::queue<Instruction *> toVisit;
   toVisit.push(term);
 
-  std::set<Instruction*> BrRelated;
-  while(!toVisit.empty()){
+  std::set<Instruction *> BrRelated;
+  while (!toVisit.empty()) {
     Instruction *currInst = toVisit.front();
     BrRelated.insert(currInst);
     toVisit.pop();
 
-    for(Use &U : currInst->operands()){
-      if(Instruction *inst = dyn_cast<Instruction>(U.get())){
-        if(inst->getParent() == BB){
+    for (Use &U : currInst->operands()) {
+      if (Instruction *inst = dyn_cast<Instruction>(U.get())) {
+        if (inst->getParent() == BB) {
           toVisit.push(inst);
         }
       }
     }
   }
 
-  for(auto &inst : *BB){
-    if(BrRelated.find(&inst) == BrRelated.end())
+  for (auto &inst : *BB) {
+    if (BrRelated.find(&inst) == BrRelated.end())
       return false;
   }
 
   return true;
-
 }
 
-
-
-void CWriter::markGotoBranches(Function &F){
-  for(auto &BB : F){
+void CWriter::markGotoBranches(Function &F) {
+  for (auto &BB : F) {
     BranchInst *br = dyn_cast<BranchInst>(BB.getTerminator());
 
-    //if it's unconditional, for right now, mark it NOT as goto
-    //need an analysis later to identify unconditional goto statements
-    if(!br || !br->isConditional())
+    // if it's unconditional, for right now, mark it NOT as goto
+    // need an analysis later to identify unconditional goto statements
+    if (!br || !br->isConditional())
       continue;
 
-    //if it's in loop header or latch then it's not goto
+    // if it's in loop header or latch then it's not goto
     Loop *L = LI->getLoopFor(&BB);
-    if(L && (&BB == L->getHeader() || &BB == L->getLoopLatch()))
+    if (L && (&BB == L->getHeader() || &BB == L->getLoopLatch()))
       continue;
 
-    //if it's loop predecessor it's not goto
+    // if it's loop predecessor it's not goto
     bool isPredecessor = false;
-    for (auto succ = succ_begin(br); succ != succ_end(br); ++succ){
-	    BasicBlock *succBB = *succ;
+    for (auto succ = succ_begin(br); succ != succ_end(br); ++succ) {
+      BasicBlock *succBB = *succ;
       Loop *L = LI->getLoopFor(succBB);
-      if(L && &BB == L->getLoopPredecessor()){
+      if (L && &BB == L->getLoopPredecessor()) {
         isPredecessor = true;
         break;
       }
     }
-    if(isPredecessor)
+    if (isPredecessor)
       continue;
 
-    bool isIfReturn = isExitingFunction(br->getSuccessor(0))
-                      || isExitingFunction(br->getSuccessor(1));
-    if(isIfReturn)
+    bool isIfReturn = isExitingFunction(br->getSuccessor(0)) ||
+                      isExitingFunction(br->getSuccessor(1));
+    if (isIfReturn)
       continue;
 
-
-
-    //if the branch is not a region entry and not branching to consecutive block, then it's a goto
+    // if the branch is not a region entry and not branching to consecutive
+    // block, then it's a goto
     Region *R = RI->getRegionFor(&BB);
-    if(&BB != R->getEntry()){
-      for (auto succ = succ_begin(br); succ != succ_end(br); ++succ){
-	      BasicBlock *succBB = *succ;
-        if (std::next(Function::iterator(&BB)) != Function::iterator(succBB)){
-          //excepion: if all instructions within this bb do is to calculate for the branch, then it can still be translated as an if else block
-          if(!isPureBranchBB(&BB)){
+    if (&BB != R->getEntry()) {
+      for (auto succ = succ_begin(br); succ != succ_end(br); ++succ) {
+        BasicBlock *succBB = *succ;
+        if (std::next(Function::iterator(&BB)) != Function::iterator(succBB)) {
+          // excepion: if all instructions within this bb do is to calculate for
+          // the branch, then it can still be translated as an if else block
+          if (!isPureBranchBB(&BB)) {
             errs() << "found goto branch:" << *br << "\n";
             errs() << "from BB " << BB << "\n";
-            //gotoBranches.insert(br);
+            // gotoBranches.insert(br);
           }
         }
       }
     }
 
-
     // if we found goto branches, mark its successors as need to print labels
-    for(auto br : gotoBranches){
-      for (auto succ = succ_begin(br); succ != succ_end(br); ++succ){
-	      BasicBlock *succBB = *succ;
-        //printLabels.insert(succBB);
+    for (auto br : gotoBranches) {
+      for (auto succ = succ_begin(br); succ != succ_end(br); ++succ) {
+        BasicBlock *succBB = *succ;
+        // printLabels.insert(succBB);
       }
     }
-
   }
 }
 
 // If branch criterias:
 // 1. conditional branch
 // 2. branch is not from weird loop exits
-void CWriter::markIfBranches(Function &F, std::set<BasicBlock*> *visitedBBs){
-  for(auto &BB : F){
-    //for splitted nodes
-    //if(visitedBBs->find(&BB) != visitedBBs->end())
-    //  continue;
-    //visitedBBs->insert(&BB);
+void CWriter::markIfBranches(Function &F, std::set<BasicBlock *> *visitedBBs) {
+  for (auto &BB : F) {
+    // for splitted nodes
+    // if(visitedBBs->find(&BB) != visitedBBs->end())
+    //   continue;
+    // visitedBBs->insert(&BB);
     Instruction *term = BB.getTerminator();
     BranchInst *br = dyn_cast<BranchInst>(term);
-    if(br && gotoBranches.find(br) != gotoBranches.end()) continue;
+    if (br && gotoBranches.find(br) != gotoBranches.end())
+      continue;
 
-    if(br && br->isConditional()){
+    if (br && br->isConditional()) {
       Loop *L = LI->getLoopFor(&BB);
       bool negateCondition = false;
-      if(L && L->getHeader() == &BB && headerIsExiting(L, negateCondition))
+      if (L && L->getHeader() == &BB && headerIsExiting(L, negateCondition))
         continue;
 
-      //for loop latches
-      if(L && L->getLoopLatch() == &BB) continue;
+      // for loop latches
+      if (L && L->getLoopLatch() == &BB)
+        continue;
 
       ifBranches.push_back(br);
     }
@@ -5855,105 +5969,111 @@ void CWriter::markIfBranches(Function &F, std::set<BasicBlock*> *visitedBBs){
 }
 
 // Split the nodes that have two or more predecessors marked by if statement
-void CWriter::NodeSplitting(Function &F){
+void CWriter::NodeSplitting(Function &F) {
 
-//  std::map<BasicBlock*, int> numOfMarkedPredecessors;
-//
-//  for(auto &BB : F){
-//    // find the successors of a marked basic block
-//    for(auto &inst : BB){
-//      if(ifBranches.find(dyn_cast<BranchInst>(&inst)) != ifBranches.end()){
-//        for (auto succ = succ_begin(&inst);
-//           succ != succ_end(&inst); ++succ){
-//          BasicBlock *succBB = *succ;
-//          if(numOfMarkedPredecessors.find(succBB) ==
-//              numOfMarkedPredecessors.end())
-//            numOfMarkedPredecessors[succBB] = 1;
-//          else
-//            numOfMarkedPredecessors[succBB] ++;
-//        }
-//        break;
-//      }
-//    }
-//  }
-//
-//  for(auto const & [BB, numOfPred] : numOfMarkedPredecessors){
-//    if(numOfPred > 1){
-//      //errs() << "SUSAN: found a node to split:" << *BB << "\n";
-//      std::set<BasicBlock*> copysOfBB;
-//      std::vector<BasicBlock*> preds;
-//
-//      // Does node splitting with the following steps:
-//      // 1. copy the basic block n-1 times, n is the num of predecessor
-//      // 2. for each copied block, update the def use chain
-//      // 3. each copy gets one unique predecessor
-//      for(pred_iterator i=pred_begin(BB), e=pred_end(BB); i!=e; ++i){
-//        preds.push_back(*i);
-//      }
-//
-//
-//      ValueToValueMapTy VMap;
-//      for(long unsigned int i=1; i<preds.size(); i++){
-//        BasicBlock *pred = preds[i];
-//        //clone n-1 BBs for splitting
-//        BasicBlock *copyBB = CloneBasicBlock(BB, VMap, Twine(".")+Twine("splitted")+Twine(i));
-//
-//        //modify each instruction in copyBB to follow its own def-use chain
-//        for(auto &I : *copyBB){
-//          for (Use &U : I.operands()){
-//            Value *useVal = U.get();
-//            if(VMap.find(useVal)!=VMap.end()){
-//              U.set(VMap[useVal]);
-//            }
-//          }
-//        }
-//
-//        F.getBasicBlockList().push_back(copyBB);
-//
-//        //modify the CFG according to node splitting algorithm
-//        Instruction *term = pred->getTerminator();
-//        for(unsigned int i_succ = 0; i_succ<term->getNumSuccessors(); ++i_succ){
-//          BasicBlock *succBB = term->getSuccessor(i_succ);
-//          if(succBB == BB){
-//            term->replaceSuccessorWith(BB, copyBB);
-//          }
-//        }
-//        copysOfBB.insert(copyBB);
-//        splittedBBs.insert(copyBB);
-//      }
-//
-//      for(auto &copyBB : copysOfBB){
-//        //modify the successor's phi node to include the copied block
-//        //errs() << "SUSAN: copyBB is " << *copyBB << "\n";
-//        Instruction *term = copyBB->getTerminator();
-//        for(unsigned int i_succ = 0; i_succ<term->getNumSuccessors(); ++i_succ){
-//          BasicBlock *succBB = term->getSuccessor(i_succ);
-//          for (BasicBlock::iterator I = succBB->begin(); isa<PHINode>(I); ++I) {
-//            PHINode *phi = cast<PHINode>(I);
-//            //errs() << "SUSAN: PHINode: " << *phi << "\n";
-//            Value* originalVal = phi->getIncomingValueForBlock(BB);
-//            //errs() << "originalVal:" << *originalVal << "\n";
-//            if(isa<Instruction> (originalVal))
-//              phi->addIncoming(VMap[originalVal],copyBB);
-//            else if(isa<Constant> (originalVal))
-//              phi->addIncoming(originalVal, copyBB);
-//            else
-//              assert(0 && "PHI value is not Constant or Instruction, check!\n");
-//          }
-//        }
-//      }
-//      copysOfBB.insert(BB);
-//
-//      //In the future there might be a need to modify the phi nodes
-//      /*for(auto & bbToAdjust : copysOfBB){
-//        for (BasicBlock::iterator I = bbToAdjust->begin(); isa<PHINode>(I); ++I) {
-//          PHINode *PN = cast<PHINode>(I);
-//          errs() << "SUSAN: PHINode: " << *PN << "\n";
-//        }
-//      }*/
-//
-//    }
-//  }
+  //  std::map<BasicBlock*, int> numOfMarkedPredecessors;
+  //
+  //  for(auto &BB : F){
+  //    // find the successors of a marked basic block
+  //    for(auto &inst : BB){
+  //      if(ifBranches.find(dyn_cast<BranchInst>(&inst)) != ifBranches.end()){
+  //        for (auto succ = succ_begin(&inst);
+  //           succ != succ_end(&inst); ++succ){
+  //          BasicBlock *succBB = *succ;
+  //          if(numOfMarkedPredecessors.find(succBB) ==
+  //              numOfMarkedPredecessors.end())
+  //            numOfMarkedPredecessors[succBB] = 1;
+  //          else
+  //            numOfMarkedPredecessors[succBB] ++;
+  //        }
+  //        break;
+  //      }
+  //    }
+  //  }
+  //
+  //  for(auto const & [BB, numOfPred] : numOfMarkedPredecessors){
+  //    if(numOfPred > 1){
+  //      //errs() << "SUSAN: found a node to split:" << *BB << "\n";
+  //      std::set<BasicBlock*> copysOfBB;
+  //      std::vector<BasicBlock*> preds;
+  //
+  //      // Does node splitting with the following steps:
+  //      // 1. copy the basic block n-1 times, n is the num of predecessor
+  //      // 2. for each copied block, update the def use chain
+  //      // 3. each copy gets one unique predecessor
+  //      for(pred_iterator i=pred_begin(BB), e=pred_end(BB); i!=e; ++i){
+  //        preds.push_back(*i);
+  //      }
+  //
+  //
+  //      ValueToValueMapTy VMap;
+  //      for(long unsigned int i=1; i<preds.size(); i++){
+  //        BasicBlock *pred = preds[i];
+  //        //clone n-1 BBs for splitting
+  //        BasicBlock *copyBB = CloneBasicBlock(BB, VMap,
+  //        Twine(".")+Twine("splitted")+Twine(i));
+  //
+  //        //modify each instruction in copyBB to follow its own def-use chain
+  //        for(auto &I : *copyBB){
+  //          for (Use &U : I.operands()){
+  //            Value *useVal = U.get();
+  //            if(VMap.find(useVal)!=VMap.end()){
+  //              U.set(VMap[useVal]);
+  //            }
+  //          }
+  //        }
+  //
+  //        F.getBasicBlockList().push_back(copyBB);
+  //
+  //        //modify the CFG according to node splitting algorithm
+  //        Instruction *term = pred->getTerminator();
+  //        for(unsigned int i_succ = 0; i_succ<term->getNumSuccessors();
+  //        ++i_succ){
+  //          BasicBlock *succBB = term->getSuccessor(i_succ);
+  //          if(succBB == BB){
+  //            term->replaceSuccessorWith(BB, copyBB);
+  //          }
+  //        }
+  //        copysOfBB.insert(copyBB);
+  //        splittedBBs.insert(copyBB);
+  //      }
+  //
+  //      for(auto &copyBB : copysOfBB){
+  //        //modify the successor's phi node to include the copied block
+  //        //errs() << "SUSAN: copyBB is " << *copyBB << "\n";
+  //        Instruction *term = copyBB->getTerminator();
+  //        for(unsigned int i_succ = 0; i_succ<term->getNumSuccessors();
+  //        ++i_succ){
+  //          BasicBlock *succBB = term->getSuccessor(i_succ);
+  //          for (BasicBlock::iterator I = succBB->begin(); isa<PHINode>(I);
+  //          ++I) {
+  //            PHINode *phi = cast<PHINode>(I);
+  //            //errs() << "SUSAN: PHINode: " << *phi << "\n";
+  //            Value* originalVal = phi->getIncomingValueForBlock(BB);
+  //            //errs() << "originalVal:" << *originalVal << "\n";
+  //            if(isa<Instruction> (originalVal))
+  //              phi->addIncoming(VMap[originalVal],copyBB);
+  //            else if(isa<Constant> (originalVal))
+  //              phi->addIncoming(originalVal, copyBB);
+  //            else
+  //              assert(0 && "PHI value is not Constant or Instruction,
+  //              check!\n");
+  //          }
+  //        }
+  //      }
+  //      copysOfBB.insert(BB);
+  //
+  //      //In the future there might be a need to modify the phi nodes
+  //      /*for(auto & bbToAdjust : copysOfBB){
+  //        for (BasicBlock::iterator I = bbToAdjust->begin(); isa<PHINode>(I);
+  //        ++I) {
+  //          PHINode *PN = cast<PHINode>(I);
+  //          errs() << "SUSAN: PHINode: " << *PN << "\n";
+  //        }
+  //      }*/
+  //
+  //    }
+  //  }
 }
 
 /// Output all floating point constants that cannot be printed accurately...
@@ -6065,7 +6185,6 @@ void CWriter::printModuleTypes(raw_ostream &Out) {
     std::vector<FunctionType *> Dependencies;
     std::string NameToPrint;
   };
-
 
   std::vector<FunctionDefinition> FunctionTypeDefinitions;
   // Copy Function Types into indexable container
@@ -6188,14 +6307,14 @@ static inline bool isFPIntBitCast(Instruction &I) {
 
 bool CWriter::isNotDuplicatedDeclaration(Instruction *I, bool isPhi) {
   // If there is no mapping between IR and variable, then there's no duplication
-  //if(IR2VarName.find(I) == IR2VarName.end()) return true;
-  for(auto inst2var : IRNaming){
+  // if(IR2VarName.find(I) == IR2VarName.end()) return true;
+  for (auto inst2var : IRNaming) {
     auto inst = inst2var.first;
     auto var = inst2var.second;
-    if(I == inst){
-      auto Vars2Emit = isPhi? &phiVars : &allVars;
-      for(auto &var2emit : *Vars2Emit){
-        if(var2emit == var){
+    if (I == inst) {
+      auto Vars2Emit = isPhi ? &phiVars : &allVars;
+      for (auto &var2emit : *Vars2Emit) {
+        if (var2emit == var) {
           Vars2Emit->erase(var2emit);
           return true;
         }
@@ -6207,7 +6326,8 @@ bool CWriter::isNotDuplicatedDeclaration(Instruction *I, bool isPhi) {
 }
 
 bool CWriter::canDeclareLocalLate(Instruction &I) {
-  if(toDeclareLocals.find(&I) != toDeclareLocals.end()) return true;
+  if (toDeclareLocals.find(&I) != toDeclareLocals.end())
+    return true;
 
   if (!DeclareLocalsLate) {
     return false;
@@ -6223,106 +6343,108 @@ bool CWriter::canDeclareLocalLate(Instruction &I) {
   return true;
 }
 
-void CWriter::findSignedInsts(Instruction* inst, Instruction* signedInst){
-    if(CallInst* call = dyn_cast<CallInst>(inst)){
-      if(call->getType()->isIntegerTy())
+void CWriter::findSignedInsts(Instruction *inst, Instruction *signedInst) {
+  if (CallInst *call = dyn_cast<CallInst>(inst)) {
+    if (call->getType()->isIntegerTy())
+      signedInsts.insert(signedInst);
+  }
+
+  for (User *U : inst->users()) {
+    if (CmpInst *cmp = dyn_cast<CmpInst>(U)) {
+      switch (cmp->getPredicate()) {
+      case CmpInst::ICMP_SLE:
+      case CmpInst::ICMP_SGE:
+      case CmpInst::ICMP_SLT:
+      case CmpInst::ICMP_SGT:
+        signedInsts.insert(signedInst);
+        break;
+      default:
+        break;
+      }
+    } else if (SExtInst *sextInst = dyn_cast<SExtInst>(U)) {
+
+      if (inst->hasOneUse() || (sextInst->hasOneUse() &&
+                                isa<GetElementPtrInst>(*sextInst->user_back())))
+        declareAsCastedType[sextInst] = inst;
+
+      findSignedInsts(cast<Instruction>(sextInst), inst);
+    } else if (GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(U)) {
+      if (inst != dyn_cast<Instruction>(gepInst->getPointerOperand()))
         signedInsts.insert(signedInst);
     }
-
-    for (User *U : inst->users()) {
-      if (CmpInst *cmp = dyn_cast<CmpInst>(U)) {
-        switch(cmp->getPredicate()){
-          case CmpInst::ICMP_SLE:
-          case CmpInst::ICMP_SGE:
-          case CmpInst::ICMP_SLT:
-          case CmpInst::ICMP_SGT:
-            signedInsts.insert(signedInst);
-            break;
-          default:
-            break;
-        }
-      } else if(SExtInst * sextInst = dyn_cast<SExtInst>(U)){
-
-        if(inst->hasOneUse()
-            || (sextInst->hasOneUse() &&
-                isa<GetElementPtrInst>(*sextInst->user_back())))
-          declareAsCastedType[sextInst] = inst;
-
-        findSignedInsts(cast<Instruction>(sextInst), inst);
-      } else if (GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(U)){
-        if(inst != dyn_cast<Instruction>(gepInst->getPointerOperand()))
-         signedInsts.insert(signedInst);
-      }
-    }
+  }
 }
 
-///void CWriter::insertDeclaredInsts(Instruction* I){
-///  // all the insts associated with this variable counts as declared
-///  // Shouldn't need this code here but in case there exists empty phi
-///  std::set<StringRef> declareVars;
-///  for(auto inst2var : IRNaming)
-///    if(inst2var.first == I)
-///      declareVars.insert(inst2var.second);
+/// void CWriter::insertDeclaredInsts(Instruction* I){
+///   // all the insts associated with this variable counts as declared
+///   // Shouldn't need this code here but in case there exists empty phi
+///   std::set<StringRef> declareVars;
+///   for(auto inst2var : IRNaming)
+///     if(inst2var.first == I)
+///       declareVars.insert(inst2var.second);
 ///
-///  for(auto var : declareVars)
-///    for(auto inst2var : IRNaming)
-///      if(inst2var.second == var)
-///        declaredInsts.insert(inst2var.first);
+///   for(auto var : declareVars)
+///     for(auto inst2var : IRNaming)
+///       if(inst2var.second == var)
+///         declaredInsts.insert(inst2var.first);
 ///
-///  if(declareVars.empty())
-///    declaredInsts.insert(I);
-///}
+///   if(declareVars.empty())
+///     declaredInsts.insert(I);
+/// }
 
-void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar, bool &isDeclared,
-                                   std::set<std::string> &declaredLocals){
+void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
+                                   bool &isDeclared,
+                                   std::set<std::string> &declaredLocals) {
 
-   if (AllocaInst *AI = isDirectAlloca(I)) {
-     auto varName = GetValueName(AI);
-     if(declaredLocals.find(varName) != declaredLocals.end()) return;
-     varName = GetValueName(AI, true);
-     declaredLocals.insert(varName);
-     errs() << "SUSAN: declaring varName 5264: " << varName << "\n";
+  if (AllocaInst *AI = isDirectAlloca(I)) {
+    auto varName = GetValueName(AI);
+    if (declaredLocals.find(varName) != declaredLocals.end())
+      return;
+    varName = GetValueName(AI, true);
+    declaredLocals.insert(varName);
+    errs() << "SUSAN: declaring varName 5264: " << varName << "\n";
 
-     Out << "  ";
+    Out << "  ";
 
-     bool printedType = false;
-     for(auto [sextInst, inst] : declareAsCastedType)
-       if(inst == I){
-          errs() << "SUSAN: printing type at 5874: " << *(sextInst->getType()) << "\n";
-         printTypeNameForAddressableValue(Out, sextInst->getType(), true);
-         printedType = true;
-         break;
-       }
+    bool printedType = false;
+    for (auto [sextInst, inst] : declareAsCastedType)
+      if (inst == I) {
+        errs() << "SUSAN: printing type at 5874: " << *(sextInst->getType())
+               << "\n";
+        printTypeNameForAddressableValue(Out, sextInst->getType(), true);
+        printedType = true;
+        break;
+      }
 
-     auto type2print = AI->getAllocatedType();
-     //if(allocaTypeChange.find(AI) != allocaTypeChange.end())
-     //  type2print = allocaTypeChange[AI];
+    auto type2print = AI->getAllocatedType();
+    // if(allocaTypeChange.find(AI) != allocaTypeChange.end())
+    //   type2print = allocaTypeChange[AI];
 
-     if(!printedType){
-          errs() << "SUSAN: printing type at 5885: " << *(type2print) << "\n";
-       if(signedInsts.find(I) != signedInsts.end())
-         printTypeNameForAddressableValue(Out, type2print, true);
-       else
-         printTypeNameForAddressableValue(Out, type2print, false);
-     }
+    if (!printedType) {
+      errs() << "SUSAN: printing type at 5885: " << *(type2print) << "\n";
+      if (signedInsts.find(I) != signedInsts.end())
+        printTypeNameForAddressableValue(Out, type2print, true);
+      else
+        printTypeNameForAddressableValue(Out, type2print, false);
+    }
 
-     Out << ' ' << varName;
+    Out << ' ' << varName;
 
-     ArrayType *ArrTy = dyn_cast<ArrayType>(AI->getAllocatedType());
-     while(ArrTy){
-       Out << "[" << ArrTy->getNumElements() << "]";
-       ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType());
-     }
+    ArrayType *ArrTy = dyn_cast<ArrayType>(AI->getAllocatedType());
+    while (ArrTy) {
+      Out << "[" << ArrTy->getNumElements() << "]";
+      ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType());
+    }
 
-     Out << ";    /* Address-exposed local */\n";
-     PrintedVar = true;
-     isDeclared = true;
-   } else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
+    Out << ";    /* Address-exposed local */\n";
+    PrintedVar = true;
+    isDeclared = true;
+  } else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
 
     ///*
     // * OpenMP: skip some declarations related to OpenMP calls
     // */
-    //if(CallInst* CI = dyn_cast<CallInst>(&*I))
+    // if(CallInst* CI = dyn_cast<CallInst>(&*I))
     //  if(Function *ompCall = CI->getCalledFunction())
     //    if(ompCall->getName().contains("__kmpc_master")
     //        || ompCall->getName().contains("__kmpc_end_master"))
@@ -6331,64 +6453,66 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar, bool &isDec
     // * OpenMP end
     // */
 
-     auto varName = GetValueName(I);
-     errs() << "SUSAN: declaring varName 5298: " << varName << "\n";
-     if(declaredLocals.find(varName) != declaredLocals.end()) return;
-     errs() << "SUSAN: declared locals:\n";
-    for(auto local : declaredLocals)
+    auto varName = GetValueName(I);
+    errs() << "SUSAN: declaring varName 5298: " << varName << "\n";
+    if (declaredLocals.find(varName) != declaredLocals.end())
+      return;
+    errs() << "SUSAN: declared locals:\n";
+    for (auto local : declaredLocals)
       errs() << local << "\n";
-     if (!canDeclareLocalLate(*I) && isNotDuplicatedDeclaration(I, false)) {
-       if(declaredLocals.find(varName) != declaredLocals.end()) return;
-       auto varName = GetValueName(I, true);
-       declaredLocals.insert(varName);
+    if (!canDeclareLocalLate(*I) && isNotDuplicatedDeclaration(I, false)) {
+      if (declaredLocals.find(varName) != declaredLocals.end())
+        return;
+      auto varName = GetValueName(I, true);
+      declaredLocals.insert(varName);
 
-        errs() << "SUSAN: inst at 5950: " << *I << "\n";
-       errs() << "SUSAN: declaring " << *I << "\n";
-       Out << "  ";
+      errs() << "SUSAN: inst at 5950: " << *I << "\n";
+      errs() << "SUSAN: declaring " << *I << "\n";
+      Out << "  ";
 
-       bool printedType = false;
-       for(auto [sextInst, inst] : declareAsCastedType)
-         if(inst == I){
-           errs() << "SUSAN: printing type at 5930: " << *(sextInst->getType()) << "\n";
-           printTypeName(Out, sextInst->getType(), true) << ' ' << varName;
-           printedType = true;
-           break;
-         }
+      bool printedType = false;
+      for (auto [sextInst, inst] : declareAsCastedType)
+        if (inst == I) {
+          errs() << "SUSAN: printing type at 5930: " << *(sextInst->getType())
+                 << "\n";
+          printTypeName(Out, sextInst->getType(), true) << ' ' << varName;
+          printedType = true;
+          break;
+        }
 
-       if(!printedType){
-         errs() << "SUSAN: printing type at 5937: " << *(I->getType()) << "\n";
-         if(signedInsts.find(I) != signedInsts.end())
-           printTypeName(Out, I->getType(), true) << ' ' << varName;
-         else
-           printTypeName(Out, I->getType(), false) << ' ' << varName;
-       }
+      if (!printedType) {
+        errs() << "SUSAN: printing type at 5937: " << *(I->getType()) << "\n";
+        if (signedInsts.find(I) != signedInsts.end())
+          printTypeName(Out, I->getType(), true) << ' ' << varName;
+        else
+          printTypeName(Out, I->getType(), false) << ' ' << varName;
+      }
 
-       Out << ";\n";
+      Out << ";\n";
 
-       //insertDeclaredInsts(I);
+      // insertDeclaredInsts(I);
+    }
 
-     }
-
-     PrintedVar = true;
-     isDeclared = true;
-   }
-   // We need a temporary for the BitCast to use so it can pluck a value out
-   // of a union to do the BitCast. This is separate from the need for a
-   // variable to hold the result of the BitCast.
-   if (isFPIntBitCast(*I)) {
-     headerUseBitCastUnion();
-     Out << "  llvmBitCastUnion " << GetValueName(I)
-         << "__BITCAST_TEMPORARY;\n";
-     PrintedVar = true;
-   }
+    PrintedVar = true;
+    isDeclared = true;
+  }
+  // We need a temporary for the BitCast to use so it can pluck a value out
+  // of a union to do the BitCast. This is separate from the need for a
+  // variable to hold the result of the BitCast.
+  if (isFPIntBitCast(*I)) {
+    headerUseBitCastUnion();
+    Out << "  llvmBitCastUnion " << GetValueName(I) << "__BITCAST_TEMPORARY;\n";
+    PrintedVar = true;
+  }
 }
 
 void CWriter::printFunction(Function &F, bool inlineF) {
 
-  //SUSAN: collect function argument reference depths
-  for(auto arg = F.arg_begin(); arg != F.arg_end(); ++arg) {
+  // SUSAN: collect function argument reference depths
+  for (auto arg = F.arg_begin(); arg != F.arg_end(); ++arg) {
     Type *argTy = arg->getType();
-    if(isa<ArrayType>(argTy) || isa<PointerType>(argTy) || isa<StructType>(argTy)){
+    if (isa<ArrayType>(argTy) || isa<PointerType>(argTy) ||
+        isa<StructType>(argTy)) {
       findVariableDepth(argTy, cast<Value>(arg), 0);
     }
   }
@@ -6396,14 +6520,14 @@ void CWriter::printFunction(Function &F, bool inlineF) {
   /// isStructReturn - Should this function actually return a struct by-value?
   bool isStructReturn = F.hasStructRetAttr();
 
-  if(!inlineF){
+  if (!inlineF) {
     cwriter_assert(!F.isDeclaration());
     if (F.hasDLLImportStorageClass())
       Out << "__declspec(dllimport) ";
     if (F.hasDLLExportStorageClass())
       Out << "__declspec(dllexport) ";
-    //if (F.hasLocalLinkage())
-    //  Out << "static ";
+    // if (F.hasLocalLinkage())
+    //   Out << "static ";
   }
 
   std::string Name = GetValueName(&F);
@@ -6424,184 +6548,197 @@ void CWriter::printFunction(Function &F, bool inlineF) {
 
   iterator_range<Function::arg_iterator> args = F.args();
 
-
-  //SUSAN: build a variable - IR table
-  std::map<Value*, std::set<std::string>>IR2vars;
-  std::map<std::string,std::set<Value*>>Var2IRs;
+  // SUSAN: build a variable - IR table
+  std::map<Value *, std::set<std::string>> IR2vars;
+  std::map<std::string, std::set<Value *>> Var2IRs;
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-    if(CallInst* CI = dyn_cast<CallInst>(&*I)){
-      if(Function *F = CI->getCalledFunction()){
-        if (F->getIntrinsicID() == Intrinsic::dbg_value
-            || F->getIntrinsicID() == Intrinsic::dbg_declare){
-            Metadata *valMeta = cast<MetadataAsValue>(CI->getOperand(0))->getMetadata();
-            Metadata *varMeta = cast<MetadataAsValue>(CI->getOperand(1))->getMetadata();
-            DIExpression *expr = dyn_cast<DIExpression>(cast<MetadataAsValue>(CI->getOperand(2))->getMetadata());
-            if(expr && expr->getNumElements() > 0) continue;
-            DILocalVariable *var = dyn_cast<DILocalVariable>(varMeta);
-            assert(var && "SUSAN: 2nd argument of llvm.dbg.value is not DILocalVariable?\n");
-            std::string varName = var->getName().str();
-            if (isa<ValueAsMetadata>(valMeta)){
-              Value *valV = cast<ValueAsMetadata>(valMeta)->getValue();
-              //if(AllocaInst *alloca = dyn_cast<AllocaInst>(valV))
-              //  noneSkipAllocaInsts.insert(alloca);
-              if(Argument *arg = dyn_cast<Argument>(valV)){
-                if(varName == "i" || varName == "j" || varName == "k") continue;
-                errs() << "SUSAN: found argument 6346: " << *valV << "\n";
-                if( Var2IRs.find(varName) == Var2IRs.end() )
-                  Var2IRs[varName] = std::set<Value*>();
-                Var2IRs[varName].insert(arg);
-                errs() << "CBackend: varname: " << varName << "\n";
-                errs() << *CI << "\n";
-                allVars.insert(varName);
+    if (CallInst *CI = dyn_cast<CallInst>(&*I)) {
+      if (Function *F = CI->getCalledFunction()) {
+        if (F->getIntrinsicID() == Intrinsic::dbg_value ||
+            F->getIntrinsicID() == Intrinsic::dbg_declare) {
+          Metadata *valMeta =
+              cast<MetadataAsValue>(CI->getOperand(0))->getMetadata();
+          Metadata *varMeta =
+              cast<MetadataAsValue>(CI->getOperand(1))->getMetadata();
+          DIExpression *expr = dyn_cast<DIExpression>(
+              cast<MetadataAsValue>(CI->getOperand(2))->getMetadata());
+          if (expr && expr->getNumElements() > 0)
+            continue;
+          DILocalVariable *var = dyn_cast<DILocalVariable>(varMeta);
+          assert(var && "SUSAN: 2nd argument of llvm.dbg.value is not "
+                        "DILocalVariable?\n");
+          std::string varName = var->getName().str();
+          if (isa<ValueAsMetadata>(valMeta)) {
+            Value *valV = cast<ValueAsMetadata>(valMeta)->getValue();
+            // if(AllocaInst *alloca = dyn_cast<AllocaInst>(valV))
+            //   noneSkipAllocaInsts.insert(alloca);
+            if (Argument *arg = dyn_cast<Argument>(valV)) {
+              if (varName == "i" || varName == "j" || varName == "k")
+                continue;
+              errs() << "SUSAN: found argument 6346: " << *valV << "\n";
+              if (Var2IRs.find(varName) == Var2IRs.end())
+                Var2IRs[varName] = std::set<Value *>();
+              Var2IRs[varName].insert(arg);
+              errs() << "CBackend: varname: " << varName << "\n";
+              errs() << *CI << "\n";
+              allVars.insert(varName);
 
-                // build IR -> Vars table
-                if(IR2vars.find(arg) == IR2vars.end() )
-                  IR2vars[arg] = std::set<std::string>();
-                IR2vars[arg].insert(varName);
+              // build IR -> Vars table
+              if (IR2vars.find(arg) == IR2vars.end())
+                IR2vars[arg] = std::set<std::string>();
+              IR2vars[arg].insert(varName);
 
-                //try: build just IRNaming
-                IRNaming.insert(std::make_pair(arg, varName));
-              } else if (Instruction *valInst = dyn_cast<Instruction>(valV)){
-                if(isa<TruncInst>(valInst) || isa<BitCastInst>(valInst))
-                  valInst = dyn_cast<Instruction>(valInst->getOperand(0));
+              // try: build just IRNaming
+              IRNaming.insert(std::make_pair(arg, varName));
+            } else if (Instruction *valInst = dyn_cast<Instruction>(valV)) {
+              if (isa<TruncInst>(valInst) || isa<BitCastInst>(valInst))
+                valInst = dyn_cast<Instruction>(valInst->getOperand(0));
 
-                if( Var2IRs.find(varName) == Var2IRs.end() )
-                  Var2IRs[varName] = std::set<Value*>();
-                Var2IRs[varName].insert(valInst);
+              if (Var2IRs.find(varName) == Var2IRs.end())
+                Var2IRs[varName] = std::set<Value *>();
+              Var2IRs[varName].insert(valInst);
 
-                allVars.insert(varName);
-                if (isa<PHINode>(valInst)){
-                  phiVars.insert(varName);
-                }
-
-                // build IR -> Vars table
-                if( IR2vars.find(valInst) == IR2vars.end() )
-                  IR2vars[valInst] = std::set<std::string>();
-                IR2vars[valInst].insert(varName);
-
-                //try: build just IRNaming
-                IRNaming.insert(std::make_pair(valInst, varName));
+              allVars.insert(varName);
+              if (isa<PHINode>(valInst)) {
+                phiVars.insert(varName);
               }
+
+              // build IR -> Vars table
+              if (IR2vars.find(valInst) == IR2vars.end())
+                IR2vars[valInst] = std::set<std::string>();
+              IR2vars[valInst].insert(varName);
+
+              // try: build just IRNaming
+              IRNaming.insert(std::make_pair(valInst, varName));
             }
-            else assert(0 && "SUSAN: 1st argument is not a Value?\n");
+          } else
+            assert(0 && "SUSAN: 1st argument is not a Value?\n");
         }
       }
     }
   }
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-    if(PHINode *phi = dyn_cast<PHINode>(&*I)){
-    auto name = GetValueName(phi);
-    for(auto ins2var : IRNaming)
-      if(ins2var.first == phi)
-        name = ins2var.second;
+    if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
+      auto name = GetValueName(phi);
+      for (auto ins2var : IRNaming)
+        if (ins2var.first == phi)
+          name = ins2var.second;
 
-    errs() << "SUSAN: phi related name: " << name << "\n";
-    for(unsigned i=0; i<phi->getNumIncomingValues(); ++i)
-      if(Instruction *incomingInst = dyn_cast<Instruction>(phi->getIncomingValue(i)))
-        IRNaming.insert(std::make_pair(incomingInst, name));
+      errs() << "SUSAN: phi related name: " << name << "\n";
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
+        if (Instruction *incomingInst =
+                dyn_cast<Instruction>(phi->getIncomingValue(i)))
+          IRNaming.insert(std::make_pair(incomingInst, name));
     }
   }
 
-  errs() << "=========================SUSAN: IR NAMING BEFORE=====================\n";
-  for(auto inst2var : IRNaming){
+  errs() << "=========================SUSAN: IR NAMING "
+            "BEFORE=====================\n";
+  for (auto inst2var : IRNaming) {
     errs() << *inst2var.first << " -> " << inst2var.second << "\n";
   }
 
-  std::map<Instruction*, std::map<std::string, Instruction*>> MRVar2ValMap;
+  std::map<Instruction *, std::map<std::string, Instruction *>> MRVar2ValMap;
   std::set<std::string> vars2record;
-  for(auto inst2var : IRNaming){
+  for (auto inst2var : IRNaming) {
     vars2record.insert(inst2var.second);
   }
 
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     Instruction *currInst = &*I;
-    std::map<std::string, Instruction*> var2val;
-    for(auto & var2record : vars2record)
+    std::map<std::string, Instruction *> var2val;
+    for (auto &var2record : vars2record)
       var2val[var2record] = nullptr;
     MRVar2ValMap[currInst] = var2val;
   }
 
   // build the MRVar2ValMap
-  std::map<Instruction*, std::map<std::string, Instruction*>> prevMRVar2ValMap, currMRVar2ValMap;
-  do{
+  std::map<Instruction *, std::map<std::string, Instruction *>>
+      prevMRVar2ValMap, currMRVar2ValMap;
+  do {
     prevMRVar2ValMap = MRVar2ValMap;
-    for (auto &BB : F){
-      std::map<std::string, Instruction*> prev_var2val;
+    for (auto &BB : F) {
+      std::map<std::string, Instruction *> prev_var2val;
       for (auto &I : BB) {
         Instruction *currInst = &I;
         auto curr_var2val = MRVar2ValMap[currInst];
 
         std::set<std::string> vars2gen;
-        for(auto inst2var : IRNaming)
-          if(currInst == inst2var.first)
+        for (auto inst2var : IRNaming)
+          if (currInst == inst2var.first)
             vars2gen.insert(inst2var.second);
 
-        std::map<std::string, Instruction*> merged_var2val;
-        std::map<std::string, Instruction*> prev_pred_var2val;
-        if(prev_var2val.empty()){
-          for (pred_iterator PI = pred_begin(&BB),
-               E = pred_end(&BB); PI != E; ++PI){
+        std::map<std::string, Instruction *> merged_var2val;
+        std::map<std::string, Instruction *> prev_pred_var2val;
+        if (prev_var2val.empty()) {
+          for (pred_iterator PI = pred_begin(&BB), E = pred_end(&BB); PI != E;
+               ++PI) {
             BasicBlock *pred = *PI;
             Instruction *term = pred->getTerminator();
-            std::map<std::string, Instruction*> term_var2val = MRVar2ValMap[term];
-            for(auto &[var, val] : term_var2val)
-              if(val)
+            std::map<std::string, Instruction *> term_var2val =
+                MRVar2ValMap[term];
+            for (auto &[var, val] : term_var2val)
+              if (val)
                 curr_var2val[var] = val;
 
-            if(!prev_pred_var2val.empty()){
-              for(auto &[var, val] : term_var2val)
-                if(prev_pred_var2val[var] != val && val && prev_pred_var2val[var])
+            if (!prev_pred_var2val.empty()) {
+              for (auto &[var, val] : term_var2val)
+                if (prev_pred_var2val[var] != val && val &&
+                    prev_pred_var2val[var])
                   curr_var2val[var] = nullptr;
             }
             prev_pred_var2val = term_var2val;
           }
-        }
-        else{
-          for(auto &var : vars2record)
+        } else {
+          for (auto &var : vars2record)
             curr_var2val[var] = prev_var2val[var];
         }
 
-        for(auto &var : vars2record)
-          if(vars2gen.find(var) != vars2gen.end())
-           curr_var2val[var] = currInst;
-
+        for (auto &var : vars2record)
+          if (vars2gen.find(var) != vars2gen.end())
+            curr_var2val[var] = currInst;
 
         MRVar2ValMap[currInst] = curr_var2val;
         prev_var2val = curr_var2val;
       }
     }
     currMRVar2ValMap = MRVar2ValMap;
-  } while(!changeMapValue(prevMRVar2ValMap, currMRVar2ValMap, F));
+  } while (!changeMapValue(prevMRVar2ValMap, currMRVar2ValMap, F));
 
-  //test the table
-  for(auto &[inst, var2val]: MRVar2ValMap){
+  // test the table
+  for (auto &[inst, var2val] : MRVar2ValMap) {
     errs() << "SUSAN: inst:" << *inst << "\n";
-    for(auto &[var, val] : var2val){
-      if(val)
+    for (auto &[var, val] : var2val) {
+      if (val)
         errs() << var << ":" << *val << "\n";
     }
   }
 
   // find the contradicting cases and delete them in Var2IRs table
-  // Contradicting: if at any instruction I1, it uses I2, but I2 has two coressponding
-  // variable v1 and v2, however only v2 has value I2 at this point, then the v1 -> I2 mapping needs to be deleted
-  std::vector<std::pair<Value*, std::string>> instVarPair2Delete;
-  for(auto &[inst, var2val]: MRVar2ValMap){
-    if(isa<PHINode>(inst)) continue;
+  // Contradicting: if at any instruction I1, it uses I2, but I2 has two
+  // coressponding variable v1 and v2, however only v2 has value I2 at this
+  // point, then the v1 -> I2 mapping needs to be deleted
+  std::vector<std::pair<Value *, std::string>> instVarPair2Delete;
+  for (auto &[inst, var2val] : MRVar2ValMap) {
+    if (isa<PHINode>(inst))
+      continue;
     for (unsigned i = 0, e = inst->getNumOperands(); i != e; ++i)
-      if(Instruction *operand = dyn_cast<Instruction>(inst->getOperand(i)))
-        for(auto &[var, valAtOperand] : var2val)
-          if (operand == valAtOperand){
+      if (Instruction *operand = dyn_cast<Instruction>(inst->getOperand(i)))
+        for (auto &[var, valAtOperand] : var2val)
+          if (operand == valAtOperand) {
 
-            for(auto pair : IRNaming){
-              if(pair.first == operand){
+            for (auto pair : IRNaming) {
+              if (pair.first == operand) {
                 auto var2erase = pair.second;
-                if(var2erase != var){
+                if (var2erase != var) {
                   Var2IRs[var2erase].erase(operand);
                   for (auto inst2var : IRNaming)
-                    if(inst2var.first == operand && inst2var.second == var2erase){
+                    if (inst2var.first == operand &&
+                        inst2var.second == var2erase) {
                       errs() << "SUSAN: at inst " << *inst << "\n";
-                      errs() << "SUSAN: removinginst2var at 6152: " << *(inst2var.first) << " -> " << inst2var.second << "\n";
+                      errs() << "SUSAN: removinginst2var at 6152: "
+                             << *(inst2var.first) << " -> " << inst2var.second
+                             << "\n";
                       instVarPair2Delete.push_back(inst2var);
                     }
                 }
@@ -6615,74 +6752,80 @@ void CWriter::printFunction(Function &F, bool inlineF) {
   }
 
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-    Instruction* inst = &*I;
+    Instruction *inst = &*I;
     auto MRVar2Vals = MRVar2ValMap[inst];
-    if(MRVar2Vals.empty()) continue;
+    if (MRVar2Vals.empty())
+      continue;
 
     for (unsigned i = 0, e = inst->getNumOperands(); i != e; ++i)
-      if(Instruction *operand = dyn_cast<Instruction>(inst->getOperand(i)))
-        for(auto inst2var : IRNaming)
-          if(operand == inst2var.first){
+      if (Instruction *operand = dyn_cast<Instruction>(inst->getOperand(i)))
+        for (auto inst2var : IRNaming)
+          if (operand == inst2var.first) {
             auto var = inst2var.second;
-            if(MRVar2Vals.find(var) != MRVar2Vals.end()
-                && operand != MRVar2Vals[var] && MRVar2Vals[var] != inst){
-                //Note: if it's IV, we know how to handle it and doesn't need to be deleted
-                //Note: if one of them is alloca, it should be fine
-                if(operand && MRVar2Vals[var] && (isa<AllocaInst>(operand) || isa<AllocaInst>(MRVar2Vals[var]))){
-                  //if(isa<AllocaInst>(operand) && MRVar2Vals[var])
-                  //  allocaTypeChange[operand] = MRVar2Vals[var]->getType();
-                  //else if(isa<AllocaInst>(MRVar2Vals[var]) && operand)
-                  //  allocaTypeChange[MRVar2Vals[var]] = operand->getType();
+            if (MRVar2Vals.find(var) != MRVar2Vals.end() &&
+                operand != MRVar2Vals[var] && MRVar2Vals[var] != inst) {
+              // Note: if it's IV, we know how to handle it and doesn't need to
+              // be deleted Note: if one of them is alloca, it should be fine
+              if (operand && MRVar2Vals[var] &&
+                  (isa<AllocaInst>(operand) ||
+                   isa<AllocaInst>(MRVar2Vals[var]))) {
+                // if(isa<AllocaInst>(operand) && MRVar2Vals[var])
+                //   allocaTypeChange[operand] = MRVar2Vals[var]->getType();
+                // else if(isa<AllocaInst>(MRVar2Vals[var]) && operand)
+                //   allocaTypeChange[MRVar2Vals[var]] = operand->getType();
 
-                  errs() << "SUSAN: inst at 6227: " << *inst << "\n";
-                  //declaredLocals.insert(GetValueName(operand));
-                  continue;
-                }
-                //if(!isInductionVariable(operand) && !isIVIncrement(operand)){
-                //  for(auto pair : IRNaming)
-                //    //if(pair.first == operand && pair.second == var){
-                //    //  errs() << "SUSAN: removinginst2var at 6180: " << *operand << " -> " << var << "\n";
-                //      instVarPair2Delete.push_back(pair);
-                //    }
-                //}
+                errs() << "SUSAN: inst at 6227: " << *inst << "\n";
+                // declaredLocals.insert(GetValueName(operand));
+                continue;
+              }
+              // if(!isInductionVariable(operand) && !isIVIncrement(operand)){
+              //   for(auto pair : IRNaming)
+              //     //if(pair.first == operand && pair.second == var){
+              //     //  errs() << "SUSAN: removinginst2var at 6180: " <<
+              //     *operand << " -> " << var << "\n";
+              //       instVarPair2Delete.push_back(pair);
+              //     }
+              // }
 
-                if(!isInductionVariable(MRVar2Vals[var]) && !isIVIncrement(MRVar2Vals[var])){
-                  for(auto pair : IRNaming)
-                    if(pair.first == MRVar2Vals[var] && pair.second == var){
-                      errs() << "SUSAN: removinginst2var at 6188: " << *operand << " -> " << var << "\n";
-                      instVarPair2Delete.push_back(pair);
-                    }
-                }
-
+              if (!isInductionVariable(MRVar2Vals[var]) &&
+                  !isIVIncrement(MRVar2Vals[var])) {
+                for (auto pair : IRNaming)
+                  if (pair.first == MRVar2Vals[var] && pair.second == var) {
+                    errs() << "SUSAN: removinginst2var at 6188: " << *operand
+                           << " -> " << var << "\n";
+                    instVarPair2Delete.push_back(pair);
+                  }
+              }
             }
           }
   }
 
-  for(auto deletePair : instVarPair2Delete){
+  for (auto deletePair : instVarPair2Delete) {
     IR2vars[deletePair.first].erase(deletePair.second);
     IRNaming.erase(deletePair);
   }
 
   errs() << "=========================SUSAN: IR NAMING=====================\n";
-  for(auto inst2var : IRNaming){
+  for (auto inst2var : IRNaming) {
     errs() << *inst2var.first << " -> " << inst2var.second << "\n";
   }
 
   /*
    * OpenMP: remove first two args from outline
    */
-  if(!inlineF){
-    if(F.getName() != "main")
-      Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName()) << "\n";
+  if (!inlineF) {
+    if (F.getName() != "main")
+      Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
+          << "\n";
 
-    if(IS_OPENMP_FUNCTION)
+    if (IS_OPENMP_FUNCTION)
       printFunctionProto(Out, FTy,
-                     std::make_pair(F.getAttributes(), F.getCallingConv()),
-                     Name, &args, 2);
+                         std::make_pair(F.getAttributes(), F.getCallingConv()),
+                         Name, &args, 2);
     else
       printFunctionProto(Out, FTy,
-                     std::make_pair(F.getAttributes(), F.getCallingConv()),
-                     Name, &args);
+                         std::make_pair(F.getAttributes(), F.getCallingConv()),
+                         Name, &args);
 
     Out << " {\n";
   }
@@ -6702,56 +6845,55 @@ void CWriter::printFunction(Function &F, bool inlineF) {
 
   bool PrintedVar = false;
 
-
-
   /*
-   * Naturalness: avoid cast by checking the use of the variable before it's declared
+   * Naturalness: avoid cast by checking the use of the variable before it's
+   * declared
    */
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-    Instruction* inst = &*I;
+    Instruction *inst = &*I;
     findSignedInsts(inst, inst);
   }
-  //if signedInsts have corresponding variable, then that variable is signed
+  // if signedInsts have corresponding variable, then that variable is signed
   std::set<std::string> signedVars;
-  for(auto signedInst : signedInsts)
-    for(auto inst2var : IRNaming)
-      if(inst2var.first == signedInst)
+  for (auto signedInst : signedInsts)
+    for (auto inst2var : IRNaming)
+      if (inst2var.first == signedInst)
         signedVars.insert(inst2var.second);
 
-  for(auto signedVar : signedVars)
-    for(auto inst2var : IRNaming)
-      if(inst2var.second == signedVar)
-        if(Instruction* inst = dyn_cast<Instruction>(inst2var.first))
+  for (auto signedVar : signedVars)
+    for (auto inst2var : IRNaming)
+      if (inst2var.second == signedVar)
+        if (Instruction *inst = dyn_cast<Instruction>(inst2var.first))
           signedInsts.insert(inst);
 
   // print local variable information for the function
   bool isDeclared = false;
-  if(!IS_OPENMP_FUNCTION){
-     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I){
-       if(!canDeclareLocalLate(*I))
+  if (!IS_OPENMP_FUNCTION) {
+    for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+      if (!canDeclareLocalLate(*I))
         DeclareLocalVariable(&*I, PrintedVar, isDeclared, declaredLocals);
-     }
-  }
-
-  //YEBIN: run analysis for kernels after var renaming
-  //FIXME: is this the right place?
-  if(F.getMetadata("tulip.cuda.kernel.caller")) {
-    runAnalysisOnKernelCaller(F);
-
-    Out << "unsigned threadsPerBlock = 256;\n";
-    //FIXME: add checks for dims and add prints
-    for(auto call: KernelCallDims) {
-      Out << "dim3 block" << call.second.first << "(" << call.second.second.first << ", 1, 1);\n";
-      Out << "dim3 grid" << call.second.first << "((";
-      writeOperand(call.second.second.second);
-      Out << "+block" << call.second.first << ".x-1)/block" << call.second.first << ".x, 1, 1);\n\n";
     }
   }
 
+  // YEBIN: run analysis for kernels after var renaming
+  // FIXME: is this the right place?
+  if (F.getMetadata("tulip.cuda.kernel.caller")) {
+    runAnalysisOnKernelCaller(F);
+
+    Out << "unsigned threadsPerBlock = 256;\n";
+    // FIXME: add checks for dims and add prints
+    for (auto call : KernelCallDims) {
+      Out << "dim3 block" << call.second.first << "("
+          << call.second.second.first << ", 1, 1);\n";
+      Out << "dim3 grid" << call.second.first << "((";
+      writeOperand(call.second.second.second);
+      Out << "+block" << call.second.first << ".x-1)/block" << call.second.first
+          << ".x, 1, 1);\n\n";
+    }
+  }
 
   if (PrintedVar)
     Out << '\n';
-
 
   /*
    * OpenMP:
@@ -6759,227 +6901,246 @@ void CWriter::printFunction(Function &F, bool inlineF) {
    * Only prints the loop
    */
   errs() << "SUSAN: am I here 6807??\n";
-    TopRegion->printRegionDAG();
-//    std::queue<BasicBlock*> toVisit;
-//    std::set<BasicBlock*> visited;
-//    toVisit.push(&F.getEntryBlock());
-//    visited.insert(&F.getEntryBlock());
-//    errs() << "SUSAN: adding entry block: " << F.getEntryBlock() << "\n";
-//    while(!toVisit.empty()){
-//	    BasicBlock *currBB = toVisit.front();
-//	    toVisit.pop();
-//      if (Loop *L = LI->getLoopFor(currBB)) {
-//        if (L->getHeader() == currBB
-//            && L->getParentLoop() == nullptr
-//            && times2bePrinted[currBB]) {
-//          errs() << "SUSAN: printing loop " << currBB->getName() << " at 5538\n";
-//          if(NATURAL_CONTROL_FLOW)
-//            printLoopNew(L);
-//          else
-//            printLoop(L);
-//        }
-//      } else {
-//        errs() << "SUSAN: printing bb:" << currBB->getName() << "\n";
-//        printBasicBlock(currBB);
-//        times2bePrinted[currBB]--;
-//      }
-//
-//      CBERegion *R = findRegionOfBlock(currBB);
-//      if(BranchInst *br = dyn_cast<BranchInst>(currBB->getTerminator())){
-//          errs() << "SUSAN: br:" << *br << "\n";
-//          BasicBlock *succ0 = br->getSuccessor(0);
-//          BasicBlock *succOne = nullptr;
-//          if(br->isConditional()){
-//            succOne = br->getSuccessor(1);
-//          }
-//          if(succOne){
-//            Loop* L = LI->getLoopFor(succOne);
-//            if(!(L && L->getLoopLatch() == succOne))
-//              if(R && !nodeBelongsToRegion(succ0, R)) continue;
-//          }
-//          if(!succOne && R && !nodeBelongsToRegion(succ0, R)) continue;
-//          errs() << "print succ0 :" << *succ0 << "\n";
-//		      if(visited.find(succ0)==visited.end()){
-//            toVisit.push(succ0);
-//            visited.insert(succ0);
-//          }
-//
-//          if(!br->isConditional()) continue;
-//          BasicBlock *succ1 = br->getSuccessor(1);
-//          if(R && !nodeBelongsToRegion(succ1, R, true)) continue;
-//		      if(visited.find(succ1)==visited.end()){
-//            toVisit.push(succ1);
-//            visited.insert(succ1);
-//          }
-//      } else {
-//	      for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ){
-//		      BasicBlock *succBB = *succ;
-//          if(R && !nodeBelongsToRegion(succBB, R)) continue;
-//		      if(visited.find(succBB)==visited.end()){
-//            toVisit.push(succBB);
-//            visited.insert(succBB);
-//          }
-//        }
-//      }
-//    }
-//
+  TopRegion->printRegionDAG();
+  //    std::queue<BasicBlock*> toVisit;
+  //    std::set<BasicBlock*> visited;
+  //    toVisit.push(&F.getEntryBlock());
+  //    visited.insert(&F.getEntryBlock());
+  //    errs() << "SUSAN: adding entry block: " << F.getEntryBlock() << "\n";
+  //    while(!toVisit.empty()){
+  //	    BasicBlock *currBB = toVisit.front();
+  //	    toVisit.pop();
+  //      if (Loop *L = LI->getLoopFor(currBB)) {
+  //        if (L->getHeader() == currBB
+  //            && L->getParentLoop() == nullptr
+  //            && times2bePrinted[currBB]) {
+  //          errs() << "SUSAN: printing loop " << currBB->getName() << " at
+  //          5538\n"; if(NATURAL_CONTROL_FLOW)
+  //            printLoopNew(L);
+  //          else
+  //            printLoop(L);
+  //        }
+  //      } else {
+  //        errs() << "SUSAN: printing bb:" << currBB->getName() << "\n";
+  //        printBasicBlock(currBB);
+  //        times2bePrinted[currBB]--;
+  //      }
+  //
+  //      CBERegion *R = findRegionOfBlock(currBB);
+  //      if(BranchInst *br = dyn_cast<BranchInst>(currBB->getTerminator())){
+  //          errs() << "SUSAN: br:" << *br << "\n";
+  //          BasicBlock *succ0 = br->getSuccessor(0);
+  //          BasicBlock *succOne = nullptr;
+  //          if(br->isConditional()){
+  //            succOne = br->getSuccessor(1);
+  //          }
+  //          if(succOne){
+  //            Loop* L = LI->getLoopFor(succOne);
+  //            if(!(L && L->getLoopLatch() == succOne))
+  //              if(R && !nodeBelongsToRegion(succ0, R)) continue;
+  //          }
+  //          if(!succOne && R && !nodeBelongsToRegion(succ0, R)) continue;
+  //          errs() << "print succ0 :" << *succ0 << "\n";
+  //		      if(visited.find(succ0)==visited.end()){
+  //            toVisit.push(succ0);
+  //            visited.insert(succ0);
+  //          }
+  //
+  //          if(!br->isConditional()) continue;
+  //          BasicBlock *succ1 = br->getSuccessor(1);
+  //          if(R && !nodeBelongsToRegion(succ1, R, true)) continue;
+  //		      if(visited.find(succ1)==visited.end()){
+  //            toVisit.push(succ1);
+  //            visited.insert(succ1);
+  //          }
+  //      } else {
+  //	      for (auto succ = succ_begin(currBB); succ != succ_end(currBB);
+  //++succ){ 		      BasicBlock *succBB = *succ;
+  //          if(R && !nodeBelongsToRegion(succBB, R)) continue;
+  //		      if(visited.find(succBB)==visited.end()){
+  //            toVisit.push(succBB);
+  //            visited.insert(succBB);
+  //          }
+  //        }
+  //      }
+  //    }
+  //
 
-  if(!inlineF)
+  if (!inlineF)
     Out << "}\n\n";
 }
 
-void CWriter::printCmpOperator(ICmpInst *icmp, bool negateCondition){
-    switch (icmp->getPredicate()) {
-    case ICmpInst::ICMP_EQ:
-      if(negateCondition)
-        Out << "!=";
-      else Out << " == ";
-      break;
-    case ICmpInst::ICMP_NE:
-      if(negateCondition)
-        Out << "==";
-      else Out << " != ";
-      break;
-    case ICmpInst::ICMP_ULE:
-    case ICmpInst::ICMP_SLE:
-      if(negateCondition)
-        Out << ">";
-      else Out << " <= ";
-      break;
-    case ICmpInst::ICMP_UGE:
-    case ICmpInst::ICMP_SGE:
-      if(negateCondition)
-        Out << "<";
-      else Out << " >= ";
-      break;
-    case ICmpInst::ICMP_ULT:
-    case ICmpInst::ICMP_SLT:
-      if(negateCondition)
-        Out << ">=";
-      else Out << " < ";
-      break;
-    case ICmpInst::ICMP_UGT:
-    case ICmpInst::ICMP_SGT:
-      if(negateCondition)
-        Out << "<=";
-      else Out << " > ";
-      break;
-    default:
-      DBG_ERRS("Invalid icmp predicate!" << *icmp);
-      errorWithMessage("invalid icmp predicate");
-    }
+void CWriter::printCmpOperator(ICmpInst *icmp, bool negateCondition) {
+  switch (icmp->getPredicate()) {
+  case ICmpInst::ICMP_EQ:
+    if (negateCondition)
+      Out << "!=";
+    else
+      Out << " == ";
+    break;
+  case ICmpInst::ICMP_NE:
+    if (negateCondition)
+      Out << "==";
+    else
+      Out << " != ";
+    break;
+  case ICmpInst::ICMP_ULE:
+  case ICmpInst::ICMP_SLE:
+    if (negateCondition)
+      Out << ">";
+    else
+      Out << " <= ";
+    break;
+  case ICmpInst::ICMP_UGE:
+  case ICmpInst::ICMP_SGE:
+    if (negateCondition)
+      Out << "<";
+    else
+      Out << " >= ";
+    break;
+  case ICmpInst::ICMP_ULT:
+  case ICmpInst::ICMP_SLT:
+    if (negateCondition)
+      Out << ">=";
+    else
+      Out << " < ";
+    break;
+  case ICmpInst::ICMP_UGT:
+  case ICmpInst::ICMP_SGT:
+    if (negateCondition)
+      Out << "<=";
+    else
+      Out << " > ";
+    break;
+  default:
+    DBG_ERRS("Invalid icmp predicate!" << *icmp);
+    errorWithMessage("invalid icmp predicate");
+  }
 }
 
-void CWriter::printInstruction(Instruction *I, bool printSemiColon){
-    if(I->getMetadata("tulip.target.end.of.map")) return;
-    if(I->getMetadata("tulip.target.start.of.map")) return;
-    if(CallInst *CI = dyn_cast<CallInst>(I)){
-       if(CI->getCalledFunction()->getName() == "cudaMemcpy"){
-         return;
-       }
+void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
+  if (I->getMetadata("tulip.target.end.of.map"))
+    return;
+  if (I->getMetadata("tulip.target.start.of.map"))
+    return;
+  if (CallInst *CI = dyn_cast<CallInst>(I)) {
+    if (CI->getCalledFunction()->getName() == "cudaMemcpy") {
+      return;
     }
-    if(omp_SkipVals.find(I) != omp_SkipVals.end()) return;
-    if(deadInsts.find(I) != deadInsts.end()) return;
-    Out << "  ";
-    if (!isEmptyType(I->getType()) && !isInlineAsm(*I)) {
-      auto varName = GetValueName(&*I , true);
-      if (canDeclareLocalLate(*I) && !isIVIncrement(I)) {
-        errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
-        printTypeName(Out, I->getType(), false) << ' ';
-        declaredLocals.insert(varName);
-      }
-      Out << GetValueName(&*I) << " = ";
+  }
+  if (omp_SkipVals.find(I) != omp_SkipVals.end())
+    return;
+  if (deadInsts.find(I) != deadInsts.end())
+    return;
+  Out << "  ";
+  if (!isEmptyType(I->getType()) && !isInlineAsm(*I)) {
+    auto varName = GetValueName(&*I, true);
+    if (canDeclareLocalLate(*I) && !isIVIncrement(I)) {
+      errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
+      printTypeName(Out, I->getType(), false) << ' ';
+      declaredLocals.insert(varName);
     }
-    writeInstComputationInline(*I);
+    Out << GetValueName(&*I) << " = ";
+  }
+  writeInstComputationInline(*I);
 
-    if(printSemiColon)
-      Out << ";\n";
+  if (printSemiColon)
+    Out << ";\n";
 }
 
-void CWriter::keepIVUnrelatedInsts(BasicBlock *skipBB, Instruction *condInst, std::set<Instruction*> &InstsKeptFromSkipBlock){
-  for(auto &I : *skipBB){
-    if(isSkipableInst(&I)) continue;
-    if(isa<BranchInst>(&I) || isIVIncrement(cast<Value>(&I)) || &I == condInst) continue;
+void CWriter::keepIVUnrelatedInsts(
+    BasicBlock *skipBB, Instruction *condInst,
+    std::set<Instruction *> &InstsKeptFromSkipBlock) {
+  for (auto &I : *skipBB) {
+    if (isSkipableInst(&I))
+      continue;
+    if (isa<BranchInst>(&I) || isIVIncrement(cast<Value>(&I)) || &I == condInst)
+      continue;
     bool skipIVRelated = false;
-    for(User *U : I.users())
-      if(isIVIncrement(U) || isa<BranchInst>(U) || U == condInst){
+    for (User *U : I.users())
+      if (isIVIncrement(U) || isa<BranchInst>(U) || U == condInst) {
         skipIVRelated = true;
         break;
       }
-    if(skipIVRelated) continue;
+    if (skipIVRelated)
+      continue;
     InstsKeptFromSkipBlock.insert(&I);
   }
 }
 
-BasicBlock* findDoWhileExitingLatchBlock(Loop *L){
+BasicBlock *findDoWhileExitingLatchBlock(Loop *L) {
   /*SmallVector< BasicBlock*, 1> ExitingBlocks;
   SmallVector< BasicBlock*, 1> ExitBlocks;
   L->getExitingBlocks(ExitingBlocks);
   L->getExitBlocks(ExitBlocks);
 
-  for(SmallVector<BasicBlock*,1>::iterator i=ExitingBlocks.begin(), e=ExitingBlocks.end(); i!=e; ++i){
-    BasicBlock *exit = *i;
+  for(SmallVector<BasicBlock*,1>::iterator i=ExitingBlocks.begin(),
+  e=ExitingBlocks.end(); i!=e; ++i){ BasicBlock *exit = *i;
     if(L->isLoopLatch(exit))
      return exit;
   }*/
 
-  //Assuming loops are all rotated
+  // Assuming loops are all rotated
   BasicBlock *latch = L->getLoopLatch();
   errs() << "SUSAN: latch " << *latch << "\n";
   BranchInst *br = dyn_cast<BranchInst>(latch->getTerminator());
   assert(br && "latch doesn't end with branch inst??\n");
-  if(!br->isConditional())
+  if (!br->isConditional())
     return latch->getSinglePredecessor();
   return latch;
-  //return nullptr;
+  // return nullptr;
 }
 
-Instruction* CWriter::findCondInst(Loop *L, bool &negateCondition){
+Instruction *CWriter::findCondInst(Loop *L, bool &negateCondition) {
   auto header = L->getHeader();
-  Instruction* term = header->getTerminator();
-  BranchInst* brInst = dyn_cast<BranchInst>(term);
+  Instruction *term = header->getTerminator();
+  BranchInst *brInst = dyn_cast<BranchInst>(term);
   Value *cond = brInst->getCondition();
-  if(isa<CmpInst>(cond) || isa<UnaryInstruction>(cond) || isa<BinaryOperator>(cond) || isa<CallInst>(cond)){
-    if(isa<CallInst>(cond))
+  if (isa<CmpInst>(cond) || isa<UnaryInstruction>(cond) ||
+      isa<BinaryOperator>(cond) || isa<CallInst>(cond)) {
+    if (isa<CallInst>(cond))
       loopCondCalls.insert(dyn_cast<CallInst>(cond));
     BasicBlock *succ0 = brInst->getSuccessor(0);
-    if(!L->contains(succ0)) negateCondition = true;
+    if (!L->contains(succ0))
+      negateCondition = true;
     return cast<Instruction>(cond);
   }
 
   return nullptr;
 }
 
-LoopProfile* CWriter::findLoopProfile(Loop *L){
-  for(auto LP : LoopProfiles)
-    if(LP->L == L){
+LoopProfile *CWriter::findLoopProfile(Loop *L) {
+  for (auto LP : LoopProfiles)
+    if (LP->L == L) {
       errs() << "SUSAN: found LP for L:" << *L << "\n";
-      if(LP->isOmpLoop) errs() << "isomp\n";
+      if (LP->isOmpLoop)
+        errs() << "isomp\n";
       return LP;
     }
   return nullptr;
 }
 
-void CWriter::findCondRelatedInsts(BasicBlock *skipBlock, std::set<Value*> &condRelatedInsts){
+void CWriter::findCondRelatedInsts(BasicBlock *skipBlock,
+                                   std::set<Value *> &condRelatedInsts) {
 
-  if(!skipBlock) return;
+  if (!skipBlock)
+    return;
 
   Instruction *term = skipBlock->getTerminator();
-  std::queue<Instruction*> toVisit;
-  std::set<Instruction*> visited;
+  std::queue<Instruction *> toVisit;
+  std::set<Instruction *> visited;
 
   toVisit.push(term);
   visited.insert(term);
 
-  while(!toVisit.empty()){
+  while (!toVisit.empty()) {
     Instruction *currInst = toVisit.front();
     toVisit.pop();
 
-    for(Value *opnd : currInst->operands()){
+    for (Value *opnd : currInst->operands()) {
       Instruction *usedInst = dyn_cast<Instruction>(opnd);
-      if(usedInst &&
-        usedInst->getParent() == skipBlock &&
-        visited.find(usedInst) == visited.end()){
+      if (usedInst && usedInst->getParent() == skipBlock &&
+          visited.find(usedInst) == visited.end()) {
         toVisit.push(usedInst);
         visited.insert(usedInst);
         condRelatedInsts.insert(usedInst);
@@ -6988,27 +7149,29 @@ void CWriter::findCondRelatedInsts(BasicBlock *skipBlock, std::set<Value*> &cond
   }
 }
 
-//header can be skipped if there's no insts with side effect
-bool CWriter::canSkipHeader(BasicBlock* header){
+// header can be skipped if there's no insts with side effect
+bool CWriter::canSkipHeader(BasicBlock *header) {
   Value *cmp = nullptr;
   BranchInst *term = dyn_cast<BranchInst>(header->getTerminator());
-  if(term && term->isConditional()) cmp = term->getCondition();
+  if (term && term->isConditional())
+    cmp = term->getCondition();
 
   for (BasicBlock::iterator I = header->begin();
-      cast<Instruction>(I) != cmp &&
-      I != header->end() &&
-      !isa<BranchInst>(I); ++I){
+       cast<Instruction>(I) != cmp && I != header->end() && !isa<BranchInst>(I);
+       ++I) {
     Instruction *inst = &*I;
 
-    if(isSkipableInst(inst)) continue;
+    if (isSkipableInst(inst))
+      continue;
 
     bool relatedToControl = false;
-    for(User *U : inst->users())
-      if(U == cmp || U == term){
+    for (User *U : inst->users())
+      if (U == cmp || U == term) {
         relatedToControl = true;
         break;
       }
-    if(relatedToControl) continue;
+    if (relatedToControl)
+      continue;
 
     return false;
   }
@@ -7016,18 +7179,20 @@ bool CWriter::canSkipHeader(BasicBlock* header){
   return true;
 }
 
-
-void CWriter::initializeLoopPHIs(Loop *L){
+void CWriter::initializeLoopPHIs(Loop *L) {
   for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
     BasicBlock *BB = L->getBlocks()[i];
     for (BasicBlock::iterator I = BB->begin(); isa<PHINode>(I); ++I) {
       PHINode *PN = cast<PHINode>(I);
-      if(deadInsts.find(PN) != deadInsts.end()) continue;
-      if(isInductionVariable(cast<Value>(PN))) continue;
-      for(unsigned i=0; i<PN->getNumIncomingValues(); ++i){
-        BasicBlock* predBB = PN->getIncomingBlock(i);
+      if (deadInsts.find(PN) != deadInsts.end())
+        continue;
+      if (isInductionVariable(cast<Value>(PN)))
+        continue;
+      for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
+        BasicBlock *predBB = PN->getIncomingBlock(i);
         Loop *predBBL = LI->getLoopFor(predBB);
-        if(predBBL && predBBL == L) continue;
+        if (predBBL && predBBL == L)
+          continue;
 
         Out << GetValueName(PN) << " = ";
         writeOperandInternal(PN->getIncomingValue(i));
@@ -7035,30 +7200,30 @@ void CWriter::initializeLoopPHIs(Loop *L){
       }
     }
   }
-
 }
 
-void CWriter::printPHIsIfNecessary(BasicBlock *BB){
-  for(auto bb2phi : PHIValues2Print){
-    if(bb2phi.first == BB){
+void CWriter::printPHIsIfNecessary(BasicBlock *BB) {
+  for (auto bb2phi : PHIValues2Print) {
+    if (bb2phi.first == BB) {
       PHINode *phi = bb2phi.second;
-      if(deadInsts.find(phi) != deadInsts.end()) continue;
+      if (deadInsts.find(phi) != deadInsts.end())
+        continue;
       auto varName = GetValueName(phi);
       Out << std::string(2, ' ');
-      if(declaredLocals.find(varName) == declaredLocals.end()
-          && omp_declaredLocals.find(varName) == omp_declaredLocals.end()){
+      if (declaredLocals.find(varName) == declaredLocals.end() &&
+          omp_declaredLocals.find(varName) == omp_declaredLocals.end()) {
         auto varName = GetValueName(phi, true);
         printTypeName(Out, phi->getType(), false) << ' ';
         errs() << "SUSAN: printing varname 6842: " << varName << "\n";
-        if(!IS_OPENMP_FUNCTION)
+        if (!IS_OPENMP_FUNCTION)
           declaredLocals.insert(varName);
         else
           omp_declaredLocals.insert(varName);
       }
       Out << GetValueName(phi) << " = ";
-      //YEBIN: cheat for cuda dims
-      //TODO: deal with collapse
-      if(phi->getMetadata("tulip.cuda.indvar")) {
+      // YEBIN: cheat for cuda dims
+      // TODO: deal with collapse
+      if (phi->getMetadata("tulip.cuda.indvar")) {
         errs() << "YEBIN: PRINT CUDA INDVAR\n";
         Out << "blockDim.x * blockIdx.x + threadIdx.x + ";
       }
@@ -7068,72 +7233,77 @@ void CWriter::printPHIsIfNecessary(BasicBlock *BB){
   }
 }
 
-void CWriter::searchForBlocksToSkip(Loop *L, std::set<BasicBlock*> &skipBlocks){
-   BasicBlock *skipBlock = nullptr;
-   if(L->getBlocks().size() > 1){
-     skipBlock = findDoWhileExitingLatchBlock(L);
-     skipBlocks.insert(skipBlock);
-   }
+void CWriter::searchForBlocksToSkip(Loop *L,
+                                    std::set<BasicBlock *> &skipBlocks) {
+  BasicBlock *skipBlock = nullptr;
+  if (L->getBlocks().size() > 1) {
+    skipBlock = findDoWhileExitingLatchBlock(L);
+    skipBlocks.insert(skipBlock);
+  }
 
-   for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
-     BasicBlock *BB = L->getBlocks()[i];
-     if(BB == L->getHeader()){
-	     for (auto succ = succ_begin(BB); succ != succ_end(BB); ++succ){
-         BasicBlock* succBB = *succ;
-         if(skipBlock && succBB == skipBlock){
-           skipBlocks.insert(BB);
-           return;
-         }
-       }
-     }
-   }
+  for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
+    BasicBlock *BB = L->getBlocks()[i];
+    if (BB == L->getHeader()) {
+      for (auto succ = succ_begin(BB); succ != succ_end(BB); ++succ) {
+        BasicBlock *succBB = *succ;
+        if (skipBlock && succBB == skipBlock) {
+          skipBlocks.insert(BB);
+          return;
+        }
+      }
+    }
+  }
 }
 
-void CWriter::FindLiveInsFor(Loop* L, Value *val){
-  errs() << "SUSAN: finding liveins for Loop" << L->getHeader()->getName()<< "\n";
+void CWriter::FindLiveInsFor(Loop *L, Value *val) {
+  errs() << "SUSAN: finding liveins for Loop" << L->getHeader()->getName()
+         << "\n";
   Instruction *inst = dyn_cast<Instruction>(val);
-  if(!inst) return;
-  if(isExtraInductionVariable(inst)) return;
+  if (!inst)
+    return;
+  if (isExtraInductionVariable(inst))
+    return;
 
   bool isLiveIn = true;
   for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
     BasicBlock *BB = L->getBlocks()[i];
-    if(BB == inst->getParent()) {
+    if (BB == inst->getParent()) {
       isLiveIn = false;
       break;
     }
   }
 
-  if(!isDirectAlloca(inst) && !isInlinableInst(*inst) && isLiveIn){
+  if (!isDirectAlloca(inst) && !isInlinableInst(*inst) && isLiveIn) {
     errs() << "SUSAN: found livein" << *inst << "\n";
     omp_liveins[L].insert(inst);
   }
 
-
-  std::queue<Instruction*> toVisit;
-  std::set<Instruction*> visited;
+  std::queue<Instruction *> toVisit;
+  std::set<Instruction *> visited;
   toVisit.push(inst);
   visited.insert(inst);
-  while(!toVisit.empty()){
-    Instruction* currInst = toVisit.front();
+  while (!toVisit.empty()) {
+    Instruction *currInst = toVisit.front();
     toVisit.pop();
 
-    for(Value *opnd : currInst->operands()){
+    for (Value *opnd : currInst->operands()) {
       Instruction *usedInst = dyn_cast<Instruction>(opnd);
-      if(!usedInst) continue;
+      if (!usedInst)
+        continue;
 
       bool skipInst = false;
       for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
         BasicBlock *BB = L->getBlocks()[i];
-        if(BB == usedInst->getParent()){
+        if (BB == usedInst->getParent()) {
           skipInst = true;
           break;
         }
       }
-      if(skipInst) continue;
+      if (skipInst)
+        continue;
 
-      if(visited.find(usedInst) == visited.end()
-        && !isDirectAlloca(usedInst) && !isInlinableInst(*usedInst)){
+      if (visited.find(usedInst) == visited.end() &&
+          !isDirectAlloca(usedInst) && !isInlinableInst(*usedInst)) {
         toVisit.push(usedInst);
         visited.insert(usedInst);
         errs() << "SUSAN: found livein at used" << *usedInst << "\n";
@@ -7141,22 +7311,25 @@ void CWriter::FindLiveInsFor(Loop* L, Value *val){
       }
     }
 
-    for(User *U : currInst->users()){
+    for (User *U : currInst->users()) {
       Instruction *userInst = dyn_cast<Instruction>(U);
-      if(!userInst) continue;
+      if (!userInst)
+        continue;
 
       bool skipInst = false;
       for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
         BasicBlock *BB = L->getBlocks()[i];
-        if(BB == userInst->getParent()){
+        if (BB == userInst->getParent()) {
           skipInst = true;
           break;
         }
       }
-      if(skipInst) continue;
+      if (skipInst)
+        continue;
 
-      if(StoreInst *store = dyn_cast<StoreInst>(U)){
-        if(store->getPointerOperand() == cast<Value>(currInst) && !isInlinableInst(*userInst)){
+      if (StoreInst *store = dyn_cast<StoreInst>(U)) {
+        if (store->getPointerOperand() == cast<Value>(currInst) &&
+            !isInlinableInst(*userInst)) {
           toVisit.push(store);
           visited.insert(store);
           errs() << "SUSAN: found livein at store" << *store << "\n";
@@ -7167,128 +7340,140 @@ void CWriter::FindLiveInsFor(Loop* L, Value *val){
   }
 }
 
-bool is_number(const std::string& s)
-{
-    return !s.empty() && std::find_if(s.begin(),
-        s.end(), [](unsigned char c) { return !std::isdigit(c); }) == s.end();
+bool is_number(const std::string &s) {
+  return !s.empty() && std::find_if(s.begin(), s.end(), [](unsigned char c) {
+                         return !std::isdigit(c);
+                       }) == s.end();
 }
 
-bool CWriter::isSkipableInst(Instruction* inst){
-    //if(noneSkipAllocaInsts.find(inst) != noneSkipAllocaInsts.end())return false;
-    if(omp_SkipVals.find(inst) != omp_SkipVals.end()) return true;
-    //if(skipInstsForPhis.find(inst) != skipInstsForPhis.end()) return true;
-    if(deadInsts.find(inst) != deadInsts.end()) return true;
-    if(deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()) return true;
-    if(isa<PHINode>(inst)) return true;
-    if(isInlinableInst(*inst)) return true;
-    if(isDirectAlloca(inst)) return true;
-    if(isIVIncrement(inst)) return true;
-    if(isExtraIVIncrement(inst)) return true;
+bool CWriter::isSkipableInst(Instruction *inst) {
+  // if(noneSkipAllocaInsts.find(inst) != noneSkipAllocaInsts.end())return
+  // false;
+  if (omp_SkipVals.find(inst) != omp_SkipVals.end())
+    return true;
+  // if(skipInstsForPhis.find(inst) != skipInstsForPhis.end()) return true;
+  if (deadInsts.find(inst) != deadInsts.end())
+    return true;
+  if (deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end())
+    return true;
+  if (isa<PHINode>(inst))
+    return true;
+  if (isInlinableInst(*inst))
+    return true;
+  if (isDirectAlloca(inst))
+    return true;
+  if (isIVIncrement(inst))
+    return true;
+  if (isExtraIVIncrement(inst))
+    return true;
 
-    if(CallInst* CI = dyn_cast<CallInst>(inst))
-      if(Function *F = CI->getCalledFunction())
-        if (F->getIntrinsicID() == Intrinsic::dbg_value
-            || F->getIntrinsicID() == Intrinsic::dbg_declare){
-          return true;
-        }
+  if (CallInst *CI = dyn_cast<CallInst>(inst))
+    if (Function *F = CI->getCalledFunction())
+      if (F->getIntrinsicID() == Intrinsic::dbg_value ||
+          F->getIntrinsicID() == Intrinsic::dbg_declare) {
+        return true;
+      }
 
-
-    return false;
+  return false;
 }
 
-void CWriter::OMP_RecordLiveIns(LoopProfile *LP){
-   Loop *L = LP->L;
-   errs() << "SUSAN: recording livein for loop: " << *L << "\n";
-   std::set<BasicBlock*> skipBlocks;
-   searchForBlocksToSkip(L, skipBlocks);
-   for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
-     BasicBlock *BB = L->getBlocks()[i];
-     if(skipBlocks.find(BB) != skipBlocks.end()) continue;
-     errs() << "SUSAN: finding live-in for" << BB->getName() << "\n";
+void CWriter::OMP_RecordLiveIns(LoopProfile *LP) {
+  Loop *L = LP->L;
+  errs() << "SUSAN: recording livein for loop: " << *L << "\n";
+  std::set<BasicBlock *> skipBlocks;
+  searchForBlocksToSkip(L, skipBlocks);
+  for (unsigned i = 0, e = L->getBlocks().size(); i != e; ++i) {
+    BasicBlock *BB = L->getBlocks()[i];
+    if (skipBlocks.find(BB) != skipBlocks.end())
+      continue;
+    errs() << "SUSAN: finding live-in for" << BB->getName() << "\n";
 
-     for(auto &I : *BB){
-       bool negateCondition;
-       if(LP->isOmpLoop && findCondInst(L, negateCondition) == &I) continue;
-       FindLiveInsFor(L, &I);
-     }
-   }
-   errs() << "SUSAN: finding live-in for lb" << *LP->lb << "\n";
-   FindLiveInsFor(L, LP->lb);
-   errs() << "SUSAN: finding live-in for ub" << *LP->ub << "\n";
-   FindLiveInsFor(L, LP->ub);
+    for (auto &I : *BB) {
+      bool negateCondition;
+      if (LP->isOmpLoop && findCondInst(L, negateCondition) == &I)
+        continue;
+      FindLiveInsFor(L, &I);
+    }
+  }
+  errs() << "SUSAN: finding live-in for lb" << *LP->lb << "\n";
+  FindLiveInsFor(L, LP->lb);
+  errs() << "SUSAN: finding live-in for ub" << *LP->ub << "\n";
+  FindLiveInsFor(L, LP->ub);
 }
 
-void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value*> skipInsts) {
+void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
   errs() << "CBEBackend: printing bb 7082 " << BB->getName() << "\n";
 
-if( NATURAL_CONTROL_FLOW ){
-  // Don't print the label for the basic block if there are no uses, or if
-  // the only terminator use is the predecessor basic block's terminator.
-  // We have to scan the use list because PHI nodes use basic blocks too but
-  // do not require a label to be generated.
+  if (NATURAL_CONTROL_FLOW) {
+    // Don't print the label for the basic block if there are no uses, or if
+    // the only terminator use is the predecessor basic block's terminator.
+    // We have to scan the use list because PHI nodes use basic blocks too but
+    // do not require a label to be generated.
 
-  if (printLabels.find(BB) != printLabels.end()) {
-    Out << GetValueName(BB) << ":";
-    // A label immediately before a late variable declaration is problematic,
-    // because "a label can only be part of a statement and a declaration is not
-    // a statement" (GCC). Adding a ";" is a simple workaround.
-    if (DeclareLocalsLate) {
-      Out << ";";
+    if (printLabels.find(BB) != printLabels.end()) {
+      Out << GetValueName(BB) << ":";
+      // A label immediately before a late variable declaration is problematic,
+      // because "a label can only be part of a statement and a declaration is
+      // not a statement" (GCC). Adding a ";" is a simple workaround.
+      if (DeclareLocalsLate) {
+        Out << ";";
+      }
+      Out << "\n";
     }
-    Out << "\n";
-  }
-} else {
-  bool NeedsLabel = false;
-  for (pred_iterator PI = pred_begin(BB), E = pred_end(BB); PI != E; ++PI)
-    if (isGotoCodeNecessary(*PI, BB)) {
-      NeedsLabel = true;
-      break;
-    }
+  } else {
+    bool NeedsLabel = false;
+    for (pred_iterator PI = pred_begin(BB), E = pred_end(BB); PI != E; ++PI)
+      if (isGotoCodeNecessary(*PI, BB)) {
+        NeedsLabel = true;
+        break;
+      }
 
-  if (NeedsLabel) {
-    Out << GetValueName(BB) << ":";
-    // A label immediately before a late variable declaration is problematic,
-    // because "a label can only be part of a statement and a declaration is not
-    // a statement" (GCC). Adding a ";" is a simple workaround.
-    if (DeclareLocalsLate) {
-      Out << ";";
+    if (NeedsLabel) {
+      Out << GetValueName(BB) << ":";
+      // A label immediately before a late variable declaration is problematic,
+      // because "a label can only be part of a statement and a declaration is
+      // not a statement" (GCC). Adding a ";" is a simple workaround.
+      if (DeclareLocalsLate) {
+        Out << ";";
+      }
+      Out << "\n";
     }
-    Out << "\n";
   }
-}
 
   // Output all of the instructions in the basic block...
   for (BasicBlock::iterator II = BB->begin(), E = --BB->end(); II != E; ++II) {
-    Instruction* inst = &*II;
-    if(inst->getMetadata("tulip.target.start.of.map")) continue;
-    if(inst->getMetadata("tulip.target.end.of.map")) continue;
-    if(isSkipableInst(inst)) continue;
-
+    Instruction *inst = &*II;
+    if (inst->getMetadata("tulip.target.start.of.map"))
+      continue;
+    if (inst->getMetadata("tulip.target.end.of.map"))
+      continue;
+    if (isSkipableInst(inst))
+      continue;
 
     /*
      * OpenMP: translate omp master
      */
-    if(CallInst* CI = dyn_cast<CallInst>(inst)){
-      if(Function *ompCall = CI->getCalledFunction()){
-        if(ompCall->getName().contains("__kmpc_master")){
+    if (CallInst *CI = dyn_cast<CallInst>(inst)) {
+      if (Function *ompCall = CI->getCalledFunction()) {
+        if (ompCall->getName().contains("__kmpc_master")) {
           Out << "#pragma omp master\n{\n";
           continue;
         }
-        if(ompCall->getName().contains("__kmpc_end_master")){
+        if (ompCall->getName().contains("__kmpc_end_master")) {
           Out << "}\n";
           continue;
         }
       }
     }
 
-    //if(noneSkipAllocaInsts.find(&*II) != noneSkipAllocaInsts.end()){
-    //  AllocaInst *alloca = dyn_cast<AllocaInst>(&*II);
-    //  PointerType *ptrTy = dyn_cast<PointerType>(II->getType());
-    //  if(ptrTy){
-    //    errs() << "SUSAN: printing type name at 7200 " << *alloca << "\n";
-    //    printTypeName(Out, ptrTy->getPointerElementType(), false) << ' ';
-    //  }
-    //  Out << GetValueName(&*II);
+    // if(noneSkipAllocaInsts.find(&*II) != noneSkipAllocaInsts.end()){
+    //   AllocaInst *alloca = dyn_cast<AllocaInst>(&*II);
+    //   PointerType *ptrTy = dyn_cast<PointerType>(II->getType());
+    //   if(ptrTy){
+    //     errs() << "SUSAN: printing type name at 7200 " << *alloca << "\n";
+    //     printTypeName(Out, ptrTy->getPointerElementType(), false) << ' ';
+    //   }
+    //   Out << GetValueName(&*II);
 
     //  Type *currTy = alloca->getAllocatedType();
     //  while(ArrayType *arrTy = dyn_cast<ArrayType>(currTy)){
@@ -7302,23 +7487,24 @@ if( NATURAL_CONTROL_FLOW ){
       if (!isEmptyType(II->getType()) || isa<StoreInst>(&*II))
         Out << "  ";
 
-      if ((&*II)->user_begin() != (&*II)->user_end() && !isEmptyType(II->getType()) && !isInlineAsm(*II)) {
+      if ((&*II)->user_begin() != (&*II)->user_end() &&
+          !isEmptyType(II->getType()) && !isInlineAsm(*II)) {
         auto varName = GetValueName(&*II);
-        if(declaredLocals.find(varName) == declaredLocals.end()
-          && omp_declaredLocals.find(varName) == omp_declaredLocals.end()){
+        if (declaredLocals.find(varName) == declaredLocals.end() &&
+            omp_declaredLocals.find(varName) == omp_declaredLocals.end()) {
           auto varName = GetValueName(&*II, true);
           auto typeName = II->getType();
-          for(auto [argInput, type] : type2declare){
+          for (auto [argInput, type] : type2declare) {
             auto argInputName = GetValueName(argInput);
-            if(argInputName == varName)
+            if (argInputName == varName)
               typeName = type;
           }
-          if(mallocType.find(&*II) != mallocType.end()){
+          if (mallocType.find(&*II) != mallocType.end()) {
             typeName = mallocType[&*II];
           }
           printTypeName(Out, typeName, false) << ' ';
           errs() << "SUSAN: printing varname 7310: " << varName << "\n";
-          if(!IS_OPENMP_FUNCTION)
+          if (!IS_OPENMP_FUNCTION)
             declaredLocals.insert(varName);
           else
             omp_declaredLocals.insert(varName);
@@ -7335,7 +7521,6 @@ if( NATURAL_CONTROL_FLOW ){
   ////check if a phi value need to be printed
   printPHIsIfNecessary(BB);
 
-
   // Don't emit prefix or suffix for the terminator.
   visit(*BB->getTerminator());
 }
@@ -7344,7 +7529,8 @@ if( NATURAL_CONTROL_FLOW ){
 // necessary because we use the instruction classes as opaque types...
 void CWriter::visitReturnInst(ReturnInst &I) {
   CurInstr = &I;
-  if(deadInsts.find(&I) != deadInsts.end()) return;
+  if (deadInsts.find(&I) != deadInsts.end())
+    return;
 
   // If this is a struct return function, return the temporary struct.
   bool isStructReturn = I.getParent()->getParent()->hasStructRetAttr();
@@ -7370,56 +7556,55 @@ void CWriter::visitReturnInst(ReturnInst &I) {
   Out << ";\n";
 }
 
-
-void CWriter::naturalSwitchTranslation(SwitchInst &SI){
+void CWriter::naturalSwitchTranslation(SwitchInst &SI) {
   CurInstr = &SI;
   BasicBlock *switchBB = SI.getParent();
-
 
   Value *Cond = SI.getCondition();
   unsigned NumBits = cast<IntegerType>(Cond->getType())->getBitWidth();
 
   if (SI.getNumCases() == 0) { // unconditional branch
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
     printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
     Out << "\n";
 
   } else if (NumBits <= 64) { // model as a switch statement
     Out << "  switch (";
     writeOperand(Cond);
-    //Out << ") {\n  default:\n";
+    // Out << ") {\n  default:\n";
     Out << ") {\n";
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
-    //emitSwitchBlock(SI.getDefaultDest(), switchBB);
-    //Out << "    break;\n";
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // emitSwitchBlock(SI.getDefaultDest(), switchBB);
+    // Out << "    break;\n";
 
-    std::map<BasicBlock*, std::set<ConstantInt*>> groupSameCases;
-    for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e; ++i){
+    std::map<BasicBlock *, std::set<ConstantInt *>> groupSameCases;
+    for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e;
+         ++i) {
       ConstantInt *CaseVal = i->getCaseValue();
       BasicBlock *Succ = i->getCaseSuccessor();
-      if(groupSameCases.find(Succ) == groupSameCases.end())
-        groupSameCases[Succ] = { CaseVal };
+      if (groupSameCases.find(Succ) == groupSameCases.end())
+        groupSameCases[Succ] = {CaseVal};
       else
         groupSameCases[Succ].insert(CaseVal);
     }
 
-    for(auto [caseBB, caseVals] : groupSameCases){
-      for(auto caseVal :caseVals){
+    for (auto [caseBB, caseVals] : groupSameCases) {
+      for (auto caseVal : caseVals) {
         Out << "  case ";
         writeOperand(caseVal);
         Out << ":\n";
       }
       emitSwitchBlock(caseBB, switchBB);
 
-      //if succBB is exiting function, then don't print break but print return
-      if(BasicBlock *ret = isExitingFunction(caseBB))
+      // if succBB is exiting function, then don't print break but print return
+      if (BasicBlock *ret = isExitingFunction(caseBB))
         printInstruction(ret->getTerminator());
       else
         Out << "    break;\n";
     }
 
     Out << "  default:\n";
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
     emitSwitchBlock(SI.getDefaultDest(), switchBB);
     Out << "    break;\n";
 
@@ -7436,12 +7621,12 @@ void CWriter::naturalSwitchTranslation(SwitchInst &SI){
       visitICmpInst(*icmp);
       delete icmp;
       Out << ") {\n";
-      //printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
+      // printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
       printBranchToBlock(SI.getParent(), Succ, 2);
       Out << "  } else ";
     }
     Out << "{\n";
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
     printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
     Out << "  }\n";
   }
@@ -7449,7 +7634,7 @@ void CWriter::naturalSwitchTranslation(SwitchInst &SI){
 }
 
 void CWriter::visitSwitchInst(SwitchInst &SI) {
-  if(NATURAL_CONTROL_FLOW){
+  if (NATURAL_CONTROL_FLOW) {
     naturalSwitchTranslation(SI);
     return;
   }
@@ -7460,7 +7645,7 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
   unsigned NumBits = cast<IntegerType>(Cond->getType())->getBitWidth();
 
   if (SI.getNumCases() == 0) { // unconditional branch
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
     printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
     Out << "\n";
 
@@ -7468,7 +7653,7 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
     Out << "  switch (";
     writeOperand(Cond);
     Out << ") {\n  default:\n";
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
     printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
 
     // Skip the first item since that's the default case.
@@ -7479,7 +7664,7 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
       Out << "  case ";
       writeOperand(CaseVal);
       Out << ":\n";
-      //printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
+      // printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
       if (isGotoCodeNecessary(SI.getParent(), Succ))
         printBranchToBlock(SI.getParent(), Succ, 2);
       else
@@ -7498,12 +7683,12 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
       visitICmpInst(*icmp);
       delete icmp;
       Out << ") {\n";
-      //printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
+      // printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
       printBranchToBlock(SI.getParent(), Succ, 2);
       Out << "  } else ";
     }
     Out << "{\n";
-    //printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
     printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
     Out << "  }\n";
   }
@@ -7526,37 +7711,40 @@ void CWriter::visitUnreachableInst(UnreachableInst &I) {
 }
 
 bool CWriter::isGotoCodeNecessary(BasicBlock *From, BasicBlock *To) {
-  if(NATURAL_CONTROL_FLOW) return false;
-  else return true; // Not the direct successor, we need a goto.
+  if (NATURAL_CONTROL_FLOW)
+    return false;
+  else
+    return true; // Not the direct successor, we need a goto.
 }
 
-bool CWriter::alreadyPrintedPHIVal(BasicBlock* predBB, PHINode* phi){
+bool CWriter::alreadyPrintedPHIVal(BasicBlock *predBB, PHINode *phi) {
 
-  for(auto bb2phi : PHIValues2Print)
-    if(bb2phi.first == predBB && bb2phi.second == phi) return false;
+  for (auto bb2phi : PHIValues2Print)
+    if (bb2phi.first == predBB && bb2phi.second == phi)
+      return false;
 
   return true;
 }
 
-void CWriter::printPHICopiesForAllPhis(BasicBlock *CurBlock,
-                                        unsigned Indent) {
-  std::queue<BasicBlock*> toVisit;
-  std::set<BasicBlock*> visited;
+void CWriter::printPHICopiesForAllPhis(BasicBlock *CurBlock, unsigned Indent) {
+  std::queue<BasicBlock *> toVisit;
+  std::set<BasicBlock *> visited;
   toVisit.push(CurBlock);
   visited.insert(CurBlock);
-  while(!toVisit.empty()){
-	  BasicBlock *currBB = toVisit.front();
-	  toVisit.pop();
-	  for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ){
-		  BasicBlock *succBB = *succ;
-		  if(visited.find(succBB)==visited.end()){
+  while (!toVisit.empty()) {
+    BasicBlock *currBB = toVisit.front();
+    toVisit.pop();
+    for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ) {
+      BasicBlock *succBB = *succ;
+      if (visited.find(succBB) == visited.end()) {
 
-        //print phi value for the successors
+        // print phi value for the successors
         for (BasicBlock::iterator I = succBB->begin(); isa<PHINode>(I); ++I) {
           PHINode *PN = cast<PHINode>(I);
-          if(PN->getBasicBlockIndex(CurBlock) >= 0 && !alreadyPrintedPHIVal(CurBlock, PN)){
-            //printedPHIValues.insert(std::make_pair(CurBlock, PN));
-            // Now we have to do the printing.
+          if (PN->getBasicBlockIndex(CurBlock) >= 0 &&
+              !alreadyPrintedPHIVal(CurBlock, PN)) {
+            // printedPHIValues.insert(std::make_pair(CurBlock, PN));
+            //  Now we have to do the printing.
             Value *IV = PN->getIncomingValueForBlock(CurBlock);
             if (!isa<UndefValue>(IV) && !isEmptyType(IV->getType())) {
               Out << std::string(Indent, ' ');
@@ -7567,10 +7755,10 @@ void CWriter::printPHICopiesForAllPhis(BasicBlock *CurBlock,
           }
         }
 
-			  visited.insert(succBB);
-			  toVisit.push(succBB);
-		  }
-	  }
+        visited.insert(succBB);
+        toVisit.push(succBB);
+      }
+    }
   }
 }
 void CWriter::printPHICopiesForSuccessor(BasicBlock *CurBlock,
@@ -7579,8 +7767,9 @@ void CWriter::printPHICopiesForSuccessor(BasicBlock *CurBlock,
   for (BasicBlock::iterator I = Successor->begin(); isa<PHINode>(I); ++I) {
     PHINode *PN = cast<PHINode>(I);
     Value *IV = PN->getIncomingValueForBlock(CurBlock);
-    if (!isa<UndefValue>(IV) && !isEmptyType(IV->getType()) && !alreadyPrintedPHIVal(CurBlock, PN)) {
-      //printedPHIValues.insert(std::make_pair(CurBlock, PN));
+    if (!isa<UndefValue>(IV) && !isEmptyType(IV->getType()) &&
+        !alreadyPrintedPHIVal(CurBlock, PN)) {
+      // printedPHIValues.insert(std::make_pair(CurBlock, PN));
 
       Out << " " << GetValueName(PN) << " = ";
       writeOperandInternal(IV);
@@ -7591,7 +7780,7 @@ void CWriter::printPHICopiesForSuccessor(BasicBlock *CurBlock,
 
 void CWriter::printBranchToBlock(BasicBlock *CurBB, BasicBlock *Succ,
                                  unsigned Indent) {
-  if(NATURAL_CONTROL_FLOW){
+  if (NATURAL_CONTROL_FLOW) {
     BranchInst *br = dyn_cast<BranchInst>(CurBB->getTerminator());
     if (gotoBranches.find(br) != gotoBranches.end()) {
       Out << std::string(Indent, ' ') << "  goto ";
@@ -7608,40 +7797,41 @@ void CWriter::printBranchToBlock(BasicBlock *CurBB, BasicBlock *Succ,
   }
 }
 
-
-void CWriter::emitSwitchBlock(BasicBlock* start, BasicBlock *brBlock){
+void CWriter::emitSwitchBlock(BasicBlock *start, BasicBlock *brBlock) {
 
   Region *swRegion = RI->getRegionFor(brBlock);
 
-  //if switch statement is captured by region, translate it using regioninfo
-  if(swRegion->getEntry() == brBlock){
+  // if switch statement is captured by region, translate it using regioninfo
+  if (swRegion->getEntry() == brBlock) {
 
     auto times2bePrintedBefore = times2bePrinted;
     BasicBlock *exitBB = swRegion->getExit();
-    for (Region::block_iterator I = swRegion->block_begin(), E = swRegion->block_end(); I != E; ++I){
+    for (Region::block_iterator I = swRegion->block_begin(),
+                                E = swRegion->block_end();
+         I != E; ++I) {
       BasicBlock *currBB = cast<BasicBlock>(*I);
-      if(directPathFromAtoBwithoutC(start,currBB,exitBB) && times2bePrinted[currBB] == times2bePrintedBefore[currBB]){
+      if (directPathFromAtoBwithoutC(start, currBB, exitBB) &&
+          times2bePrinted[currBB] == times2bePrintedBefore[currBB]) {
         printBasicBlock(currBB);
         times2bePrinted[currBB]--;
       }
     }
-  }
-  else{
-    std::set<BasicBlock*> visited;
-    std::queue<BasicBlock*> toVisit;
+  } else {
+    std::set<BasicBlock *> visited;
+    std::queue<BasicBlock *> toVisit;
     visited.insert(start);
     toVisit.push(start);
-    while(!toVisit.empty()){
+    while (!toVisit.empty()) {
       BasicBlock *currBB = toVisit.front();
 
       // TODO: need a systematic way to check when does a branch end
       // currently just adding patches here and there
       // e.x.,: currBB == otherStart is added from supermutation
-      if(PDT->dominates(currBB, brBlock)){
+      if (PDT->dominates(currBB, brBlock)) {
         break;
       }
 
-      if(!times2bePrinted[currBB]){
+      if (!times2bePrinted[currBB]) {
         toVisit.pop();
         continue;
       }
@@ -7651,180 +7841,179 @@ void CWriter::emitSwitchBlock(BasicBlock* start, BasicBlock *brBlock){
 
       toVisit.pop();
 
-      for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ){
-          BasicBlock *succBB = *succ;
-          if(visited.find(succBB)==visited.end()){
-            visited.insert(succBB);
-            toVisit.push(succBB);
-          }
+      for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ) {
+        BasicBlock *succBB = *succ;
+        if (visited.find(succBB) == visited.end()) {
+          visited.insert(succBB);
+          toVisit.push(succBB);
+        }
       }
     }
   }
 }
 
-bool CWriter::edgeBelongsToSubRegions(BasicBlock *fromBB, BasicBlock* toBB,
-                                  CBERegion *R, bool isElseBranch){
-  auto currRedges = isElseBranch? R->elseEdges : R->thenEdges;
-  for(auto edge : currRedges)
-    if(edge.first == fromBB && edge.second == toBB)
+bool CWriter::edgeBelongsToSubRegions(BasicBlock *fromBB, BasicBlock *toBB,
+                                      CBERegion *R, bool isElseBranch) {
+  auto currRedges = isElseBranch ? R->elseEdges : R->thenEdges;
+  for (auto edge : currRedges)
+    if (edge.first == fromBB && edge.second == toBB)
       return true;
 
-   std::queue<CBERegion*> toVisit;
-   if(isElseBranch)
-     for(auto subR : R->elseSubRegions)
-       toVisit.push(subR);
-   else
-     for(auto subR : R->thenSubRegions)
-       toVisit.push(subR);
+  std::queue<CBERegion *> toVisit;
+  if (isElseBranch)
+    for (auto subR : R->elseSubRegions)
+      toVisit.push(subR);
+  else
+    for (auto subR : R->thenSubRegions)
+      toVisit.push(subR);
 
+  while (!toVisit.empty()) {
+    CBERegion *currNode = toVisit.front();
+    toVisit.pop();
 
-   while(!toVisit.empty()){
-     CBERegion *currNode = toVisit.front();
-     toVisit.pop();
+    for (auto edge : currNode->thenEdges)
+      if (edge.first == fromBB && edge.second == toBB)
+        return true;
+    for (auto edge : currNode->elseEdges)
+      if (edge.first == fromBB && edge.second == toBB)
+        return true;
 
-     for(auto edge : currNode->thenEdges)
-       if(edge.first == fromBB && edge.second == toBB)
-         return true;
-     for(auto edge : currNode->elseEdges)
-       if(edge.first == fromBB && edge.second == toBB)
-         return true;
+    CBERegionMap[currNode->entryBlock] = currNode;
+    for (CBERegion *subRegion : currNode->thenSubRegions) {
+      toVisit.push(subRegion);
+    }
+    for (CBERegion *subRegion : currNode->elseSubRegions) {
+      toVisit.push(subRegion);
+    }
+  }
 
-     CBERegionMap[currNode->entryBlock] = currNode;
-     for(CBERegion *subRegion : currNode->thenSubRegions){
-       toVisit.push(subRegion);
-     }
-     for(CBERegion *subRegion : currNode->elseSubRegions){
-       toVisit.push(subRegion);
-     }
-   }
-
-   return false;
+  return false;
 }
 
-bool CWriter::nodeBelongsToRegion(BasicBlock* BB,
-                                  CBERegion *R, bool isElseBranch){
+bool CWriter::nodeBelongsToRegion(BasicBlock *BB, CBERegion *R,
+                                  bool isElseBranch) {
 
-  if(isElseBranch && std::count(R->elseBBs.begin(), R->elseBBs.end(), BB))
+  if (isElseBranch && std::count(R->elseBBs.begin(), R->elseBBs.end(), BB))
     return true;
-  if(!isElseBranch && std::count(R->thenBBs.begin(), R->thenBBs.end(), BB))
+  if (!isElseBranch && std::count(R->thenBBs.begin(), R->thenBBs.end(), BB))
     return true;
 
   return false;
 }
 
-void CWriter::createSubRegionOrRecordCurrentRegion(BasicBlock* predBB, BasicBlock* currBB, CBERegion *R, bool isElseBranch){
-  if(!edgeBelongsToSubRegions(predBB, currBB, R, isElseBranch)){
-     if(isElseBranch)
-       R->elseEdges.push_back(std::make_pair(predBB, currBB));
-     else
-       R->thenEdges.push_back(std::make_pair(predBB, currBB));
+void CWriter::createSubRegionOrRecordCurrentRegion(BasicBlock *predBB,
+                                                   BasicBlock *currBB,
+                                                   CBERegion *R,
+                                                   bool isElseBranch) {
+  if (!edgeBelongsToSubRegions(predBB, currBB, R, isElseBranch)) {
+    if (isElseBranch)
+      R->elseEdges.push_back(std::make_pair(predBB, currBB));
+    else
+      R->thenEdges.push_back(std::make_pair(predBB, currBB));
 
+    if (!nodeBelongsToRegion(currBB, R, isElseBranch)) {
+      Instruction *br = currBB->getTerminator();
+      if (std::count(ifBranches.begin(), ifBranches.end(), br)) {
+        errs() << "creating subregion: " << currBB->getName() << "\n";
 
-     if(!nodeBelongsToRegion(currBB, R, isElseBranch)){
-        Instruction *br = currBB->getTerminator();
-        if(std::count(ifBranches.begin(), ifBranches.end(), br)){
-          errs() << "creating subregion: " << currBB->getName() << "\n";
+        CBERegion *newR = createNewRegion(currBB, R, isElseBranch);
+        markBranchRegion(br, newR);
+      }
 
-          CBERegion *newR = createNewRegion(currBB, R, isElseBranch);
-          markBranchRegion(br, newR);
-        }
-
-        if(isElseBranch){
-          errs() << "SUSAN: adding block to else branch" << *currBB << "\n";
-          R->elseBBs.push_back(currBB);
-        }
-        else{
-          errs() << "SUSAN: adding block to if branch" << *currBB << "\n";
-          R->thenBBs.push_back(currBB);
-        }
-     }
+      if (isElseBranch) {
+        errs() << "SUSAN: adding block to else branch" << *currBB << "\n";
+        R->elseBBs.push_back(currBB);
+      } else {
+        errs() << "SUSAN: adding block to if branch" << *currBB << "\n";
+        R->thenBBs.push_back(currBB);
+      }
+    }
   }
 }
 
-void CWriter::recordTimes2bePrintedForBranch(BasicBlock* start, BasicBlock *brBlock, BasicBlock *otherStart, CBERegion *R, bool isElseBranch){
-      std::set<std::pair<BasicBlock*, BasicBlock*>> visited;
-      std::set<BasicBlock*> visitedNodes;
-      std::queue<std::pair<BasicBlock*, BasicBlock*>> toVisit;
-      visited.insert(std::make_pair(brBlock,start));
-      visitedNodes.insert(start);
-      toVisit.push(std::make_pair(brBlock,start));
+void CWriter::recordTimes2bePrintedForBranch(BasicBlock *start,
+                                             BasicBlock *brBlock,
+                                             BasicBlock *otherStart,
+                                             CBERegion *R, bool isElseBranch) {
+  std::set<std::pair<BasicBlock *, BasicBlock *>> visited;
+  std::set<BasicBlock *> visitedNodes;
+  std::queue<std::pair<BasicBlock *, BasicBlock *>> toVisit;
+  visited.insert(std::make_pair(brBlock, start));
+  visitedNodes.insert(start);
+  toVisit.push(std::make_pair(brBlock, start));
 
-      while(!toVisit.empty()){
-        BasicBlock *currBB = toVisit.front().second;
-        BasicBlock *predBB = toVisit.front().first;
+  while (!toVisit.empty()) {
+    BasicBlock *currBB = toVisit.front().second;
+    BasicBlock *predBB = toVisit.front().first;
 
-
-
-        if(PDT->dominates(currBB, brBlock)
-            || currBB == otherStart){
-          if(isExitingFunction(otherStart)){
-            if(isa<ReturnInst>(currBB->getTerminator()) ||
-               isa<UnreachableInst>(currBB->getTerminator())){
-                createSubRegionOrRecordCurrentRegion(predBB, currBB, R, isElseBranch);
-            }
-          }
-          break;
-        }
-
-
-        createSubRegionOrRecordCurrentRegion(predBB, currBB, R, isElseBranch);
-
-        toVisit.pop();
-
-        BranchInst *br = dyn_cast<BranchInst>(currBB->getTerminator());
-
-        for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ){
-            BasicBlock *succBB = *succ;
-            bool alreadyVisited = false;
-            for(auto visitedEdge : visited)
-              if(visitedEdge.first == currBB && visitedEdge.second == succBB)
-                alreadyVisited = true;
-
-            bool backEdgeDetected = false;
-            for(auto backedge : backEdges)
-              if(backedge.first == currBB && backedge.second  == succBB)
-                backEdgeDetected = true;
-
-            Loop *L = LI->getLoopFor(succBB);
-            if(L && L->getLoopLatch() == currBB){
-              errs() << "SUSAN: found latch" << currBB->getName() << "\n";
-              backEdgeDetected = true;
-            }
-
-            if(!alreadyVisited && !backEdgeDetected){
-              visitedNodes.insert(succBB);
-              visited.insert(std::make_pair(currBB,succBB));
-              toVisit.push(std::make_pair(currBB,succBB));
-            }
+    if (PDT->dominates(currBB, brBlock) || currBB == otherStart) {
+      if (isExitingFunction(otherStart)) {
+        if (isa<ReturnInst>(currBB->getTerminator()) ||
+            isa<UnreachableInst>(currBB->getTerminator())) {
+          createSubRegionOrRecordCurrentRegion(predBB, currBB, R, isElseBranch);
         }
       }
+      break;
+    }
+
+    createSubRegionOrRecordCurrentRegion(predBB, currBB, R, isElseBranch);
+
+    toVisit.pop();
+
+    BranchInst *br = dyn_cast<BranchInst>(currBB->getTerminator());
+
+    for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ) {
+      BasicBlock *succBB = *succ;
+      bool alreadyVisited = false;
+      for (auto visitedEdge : visited)
+        if (visitedEdge.first == currBB && visitedEdge.second == succBB)
+          alreadyVisited = true;
+
+      bool backEdgeDetected = false;
+      for (auto backedge : backEdges)
+        if (backedge.first == currBB && backedge.second == succBB)
+          backEdgeDetected = true;
+
+      Loop *L = LI->getLoopFor(succBB);
+      if (L && L->getLoopLatch() == currBB) {
+        errs() << "SUSAN: found latch" << currBB->getName() << "\n";
+        backEdgeDetected = true;
+      }
+
+      if (!alreadyVisited && !backEdgeDetected) {
+        visitedNodes.insert(succBB);
+        visited.insert(std::make_pair(currBB, succBB));
+        toVisit.push(std::make_pair(currBB, succBB));
+      }
+    }
+  }
 }
 
-bool CWriter::noElseRegion(bool trueBranch, BasicBlock *brBB){
+bool CWriter::noElseRegion(bool trueBranch, BasicBlock *brBB) {
   BranchInst *br = dyn_cast<BranchInst>(brBB->getTerminator());
   errs() << "SUSAN: noElseRegion " << trueBranch << "for br: " << *br << "\n";
   BasicBlock *startBB = trueBranch ? br->getSuccessor(1) : br->getSuccessor(0);
 
   // find immediate PD BB
   BasicBlock *pdBB = nullptr;
-  std::queue<BasicBlock*> toVisit;
-  std::set<BasicBlock*> visited;
+  std::queue<BasicBlock *> toVisit;
+  std::set<BasicBlock *> visited;
   toVisit.push(startBB);
   visited.insert(startBB);
-  std::set<BasicBlock*> inBetweenBBs;
-  while(!toVisit.empty()){
-    BasicBlock* currBB = toVisit.front();
+  std::set<BasicBlock *> inBetweenBBs;
+  while (!toVisit.empty()) {
+    BasicBlock *currBB = toVisit.front();
     toVisit.pop();
 
-    if(PDT->dominates(currBB, brBB)){
+    if (PDT->dominates(currBB, brBB)) {
       pdBB = currBB;
       break;
     }
     inBetweenBBs.insert(currBB);
 
-    for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ){
+    for (auto succ = succ_begin(currBB); succ != succ_end(currBB); ++succ) {
       BasicBlock *succBB = *succ;
-      if(visited.find(succBB) == visited.end()){
+      if (visited.find(succBB) == visited.end()) {
         visited.insert(succBB);
         toVisit.push(succBB);
       }
@@ -7835,9 +8024,9 @@ bool CWriter::noElseRegion(bool trueBranch, BasicBlock *brBB){
   errs() << "SUSAN: found pdBB " << *pdBB << "\n";
 
   bool NoElseRegion = true;
-  for(auto bb : inBetweenBBs){
-    for(auto &I : *bb){
-      if(!isa<BranchInst>(&I)){
+  for (auto bb : inBetweenBBs) {
+    for (auto &I : *bb) {
+      if (!isa<BranchInst>(&I)) {
         NoElseRegion = false;
         break;
       }
@@ -7848,17 +8037,17 @@ bool CWriter::noElseRegion(bool trueBranch, BasicBlock *brBB){
   return NoElseRegion;
 }
 
-int CWriter::dominatedByReturn(BasicBlock* brBB){
+int CWriter::dominatedByReturn(BasicBlock *brBB) {
   Function *F = brBB->getParent();
   auto br = dyn_cast<BranchInst>(brBB->getTerminator());
-  if(br->isConditional()){
+  if (br->isConditional()) {
     auto succ0 = br->getSuccessor(0);
     auto succ1 = br->getSuccessor(1);
     auto singleSucc = succ0->getSingleSuccessor();
-    if(singleSucc && isa<ReturnInst>(singleSucc->getTerminator()))
+    if (singleSucc && isa<ReturnInst>(singleSucc->getTerminator()))
       return 0;
     singleSucc = succ1->getSingleSuccessor();
-    if(singleSucc && isa<ReturnInst>(singleSucc->getTerminator()))
+    if (singleSucc && isa<ReturnInst>(singleSucc->getTerminator()))
       return 1;
   }
 
@@ -7868,8 +8057,8 @@ int CWriter::dominatedByReturn(BasicBlock* brBB){
 // Branch instruction printing - Avoid printing out a branch to a basic block
 // that immediately succeeds the current one.
 void CWriter::visitBranchInst(BranchInst &I) {
-  if(!I.isConditional()){
-    //printPHICopiesForSuccessor(I.getParent(), I.getSuccessor(0), 0);
+  if (!I.isConditional()) {
+    // printPHICopiesForSuccessor(I.getParent(), I.getSuccessor(0), 0);
     errs() << "printing unconditional branch " << I << "\n";
     printBranchToBlock(I.getParent(), I.getSuccessor(0), 0);
     return;
@@ -7955,102 +8144,100 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     Value *X;
     if (match(&I, m_Neg(m_Value(X)))) {
       opcode = BinaryNeg;
-      //Out << "llvm_neg_";
-      //printTypeString(Out, VTy, false);
-      //Out << "(";
-      //writeOperand(X, ContextCasted);
+      // Out << "llvm_neg_";
+      // printTypeString(Out, VTy, false);
+      // Out << "(";
+      // writeOperand(X, ContextCasted);
       Out << "-";
       writeOperand(X, ContextCasted);
     } else if (match(&I, m_FNeg(m_Value(X)))) {
       opcode = BinaryNeg;
-      //Out << "llvm_neg_";
-      //printTypeString(Out, VTy, false);
-      //Out << "(";
-      //writeOperand(X, ContextCasted);
+      // Out << "llvm_neg_";
+      // printTypeString(Out, VTy, false);
+      // Out << "(";
+      // writeOperand(X, ContextCasted);
       Out << "-";
       writeOperand(X, ContextCasted);
     } else if (match(&I, m_Not(m_Value(X)))) {
       opcode = BinaryNot;
-      //Out << "llvm_not_";
-      //printTypeString(Out, VTy, false);
-      //Out << "(";
-      //writeOperand(X, ContextCasted);
+      // Out << "llvm_not_";
+      // printTypeString(Out, VTy, false);
+      // Out << "(";
+      // writeOperand(X, ContextCasted);
       Out << "~";
       writeOperand(X, ContextCasted);
     } else {
       opcode = I.getOpcode();
-      if(opcode == Instruction::Add || opcode == Instruction::FAdd){
-        if(ConstantInt* opnd0 = dyn_cast<ConstantInt>(I.getOperand(0))){
-          if(ConstantInt* opnd1 = dyn_cast<ConstantInt>(I.getOperand(1)))
+      if (opcode == Instruction::Add || opcode == Instruction::FAdd) {
+        if (ConstantInt *opnd0 = dyn_cast<ConstantInt>(I.getOperand(0))) {
+          if (ConstantInt *opnd1 = dyn_cast<ConstantInt>(I.getOperand(1)))
             Out << (opnd0->getSExtValue() + opnd1->getSExtValue());
-          else{
-            if(addParenthesis.find(&I) != addParenthesis.end())
+          else {
+            if (addParenthesis.find(&I) != addParenthesis.end())
               Out << "(";
             writeOperand(I.getOperand(0), ContextCasted);
             Out << " + ";
             writeOperand(I.getOperand(1), ContextCasted);
-            if(addParenthesis.find(&I) != addParenthesis.end())
+            if (addParenthesis.find(&I) != addParenthesis.end())
               Out << ")";
           }
         } else {
-          if(addParenthesis.find(&I) != addParenthesis.end())
+          if (addParenthesis.find(&I) != addParenthesis.end())
             Out << "(";
           writeOperand(I.getOperand(0), ContextCasted);
           Out << " + ";
           writeOperand(I.getOperand(1), ContextCasted);
-          if(addParenthesis.find(&I) != addParenthesis.end())
+          if (addParenthesis.find(&I) != addParenthesis.end())
             Out << ")";
         }
-      }
-      else if(opcode == Instruction::Mul || opcode == Instruction::FMul){
-        //Out << "(";
+      } else if (opcode == Instruction::Mul || opcode == Instruction::FMul) {
+        // Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " * ";
         writeOperand(I.getOperand(1), ContextCasted);
-        //Out << ")";
-      }
-      else if(opcode == Instruction::URem || opcode == Instruction::FRem){
-        //Out << "(";
+        // Out << ")";
+      } else if (opcode == Instruction::URem || opcode == Instruction::FRem) {
+        // Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " % ";
         writeOperand(I.getOperand(1), ContextCasted);
-      }
-      else if(opcode == Instruction::SRem){
-        Type* op0Ty = (I.getOperand(0))->getType();
-        Type* op1Ty = (I.getOperand(1))->getType();
-        if(op0Ty->isIntegerTy(32))
+      } else if (opcode == Instruction::SRem) {
+        Type *op0Ty = (I.getOperand(0))->getType();
+        Type *op1Ty = (I.getOperand(1))->getType();
+        if (op0Ty->isIntegerTy(32))
           Out << "(int)";
-        else if(op0Ty->isIntegerTy(64))
+        else if (op0Ty->isIntegerTy(64))
           Out << "(long long)";
-        else if(op0Ty->isFloatTy())
+        else if (op0Ty->isFloatTy())
           Out << "(float)";
-        else if(op0Ty->isDoubleTy())
+        else if (op0Ty->isDoubleTy())
           Out << "(double)";
-        else assert(0 && "SUSAN: op0Ty unimplemented cast?\n");
+        else
+          assert(0 && "SUSAN: op0Ty unimplemented cast?\n");
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " % ";
-        if(op1Ty->isIntegerTy(32))
+        if (op1Ty->isIntegerTy(32))
           Out << "(int)";
-        else if(op1Ty->isIntegerTy(64))
+        else if (op1Ty->isIntegerTy(64))
           Out << "(long long)";
-        else if(op1Ty->isFloatTy())
+        else if (op1Ty->isFloatTy())
           Out << "(float)";
-        else if(op1Ty->isDoubleTy())
+        else if (op1Ty->isDoubleTy())
           Out << "(double)";
-        else assert(0 && "SUSAN: op1Ty unimplemented cast?\n");
+        else
+          assert(0 && "SUSAN: op1Ty unimplemented cast?\n");
         writeOperand(I.getOperand(1), ContextCasted);
-      }
-      else if(opcode == Instruction::Sub || opcode == Instruction::FSub){
-        if(ConstantInt* opnd0 = dyn_cast<ConstantInt>(I.getOperand(0))){
-          if(ConstantInt* opnd1 = dyn_cast<ConstantInt>(I.getOperand(1)))
+      } else if (opcode == Instruction::Sub || opcode == Instruction::FSub) {
+        if (ConstantInt *opnd0 = dyn_cast<ConstantInt>(I.getOperand(0))) {
+          if (ConstantInt *opnd1 = dyn_cast<ConstantInt>(I.getOperand(1)))
             Out << (opnd0->getSExtValue() - opnd1->getSExtValue());
-          else{
-            if(addParenthesis.find(&I) != addParenthesis.end())
+          else {
+            if (addParenthesis.find(&I) != addParenthesis.end())
               Out << "(";
             writeOperand(I.getOperand(0), ContextCasted);
             Out << " - ";
             writeOperand(I.getOperand(1), ContextCasted);
-            if(addParenthesis.find(&I) != addParenthesis.end())
+            if (addParenthesis.find(&I) != addParenthesis.end())
               Out << ")";
           }
         } else {
@@ -8060,85 +8247,77 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
           writeOperand(I.getOperand(1), ContextCasted);
           Out << ")";
         }
-      }
-      else if(opcode == Instruction::UDiv || opcode == Instruction::FDiv){
+      } else if (opcode == Instruction::UDiv || opcode == Instruction::FDiv) {
         Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " / ";
         writeOperand(I.getOperand(1), ContextCasted);
         Out << ")";
-      }
-      else if(opcode == Instruction::SDiv){
-        Type* op0Ty = (I.getOperand(0))->getType();
-        Type* op1Ty = (I.getOperand(1))->getType();
-        //if(op0Ty->isIntegerTy(32))
-        //  Out << "(int)";
-        //else if(op0Ty->isIntegerTy(64))
-        //  Out << "(long long)";
-        //else if(op0Ty->isFloatTy())
-        //  Out << "(float)";
-        //else if(op0Ty->isDoubleTy())
-        //  Out << "(double)";
-        //else assert(0 && "SUSAN: op0Ty unimplemented cast?\n");
+      } else if (opcode == Instruction::SDiv) {
+        Type *op0Ty = (I.getOperand(0))->getType();
+        Type *op1Ty = (I.getOperand(1))->getType();
+        // if(op0Ty->isIntegerTy(32))
+        //   Out << "(int)";
+        // else if(op0Ty->isIntegerTy(64))
+        //   Out << "(long long)";
+        // else if(op0Ty->isFloatTy())
+        //   Out << "(float)";
+        // else if(op0Ty->isDoubleTy())
+        //   Out << "(double)";
+        // else assert(0 && "SUSAN: op0Ty unimplemented cast?\n");
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " / ";
-        //if(op1Ty->isIntegerTy(32))
-        //  Out << "(int)";
-        //else if(op1Ty->isIntegerTy(64))
-        //  Out << "(long long)";
-        //else if(op1Ty->isFloatTy())
-        //  Out << "(float)";
-        //else if(op1Ty->isDoubleTy())
-        //  Out << "(double)";
-        //else assert(0 && "SUSAN: op1Ty unimplemented cast?\n");
+        // if(op1Ty->isIntegerTy(32))
+        //   Out << "(int)";
+        // else if(op1Ty->isIntegerTy(64))
+        //   Out << "(long long)";
+        // else if(op1Ty->isFloatTy())
+        //   Out << "(float)";
+        // else if(op1Ty->isDoubleTy())
+        //   Out << "(double)";
+        // else assert(0 && "SUSAN: op1Ty unimplemented cast?\n");
         writeOperand(I.getOperand(1), ContextCasted);
-      }
-      else if(opcode == Instruction::LShr || opcode == Instruction::AShr){
-        if(addParenthesis.find(&I) != addParenthesis.end())
+      } else if (opcode == Instruction::LShr || opcode == Instruction::AShr) {
+        if (addParenthesis.find(&I) != addParenthesis.end())
           Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " >> ";
         writeOperand(I.getOperand(1), ContextCasted);
-        if(addParenthesis.find(&I) != addParenthesis.end())
+        if (addParenthesis.find(&I) != addParenthesis.end())
           Out << ")";
-      }
-      else if(opcode == Instruction::Shl){
-        if(addParenthesis.find(&I) != addParenthesis.end())
+      } else if (opcode == Instruction::Shl) {
+        if (addParenthesis.find(&I) != addParenthesis.end())
           Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " << ";
         writeOperand(I.getOperand(1), ContextCasted);
-        if(addParenthesis.find(&I) != addParenthesis.end())
+        if (addParenthesis.find(&I) != addParenthesis.end())
           Out << ")";
-      }
-      else if(opcode == Instruction::Xor){
-        //Out << "(";
+      } else if (opcode == Instruction::Xor) {
+        // Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " ^ ";
         writeOperand(I.getOperand(1), ContextCasted);
-      }
-      else if(opcode == Instruction::Or){
-        //Out << "(";
+      } else if (opcode == Instruction::Or) {
+        // Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " | ";
         writeOperand(I.getOperand(1), ContextCasted);
-      }
-      else if(opcode == Instruction::And){
-        //Out << "(";
+      } else if (opcode == Instruction::And) {
+        // Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << " & ";
         writeOperand(I.getOperand(1), ContextCasted);
-      }
-      else{
+      } else {
         Out << "llvm_" << Instruction::getOpcodeName(opcode) << "_";
         printTypeString(Out, VTy, false);
-        //Out << "(";
+        // Out << "(";
         writeOperand(I.getOperand(0), ContextCasted);
         Out << ", ";
         writeOperand(I.getOperand(1), ContextCasted);
       }
     }
-    //Out << ")";
+    // Out << ")";
     InlineOpDeclTypes.insert(std::pair<unsigned, Type *>(opcode, VTy));
     return;
   }
@@ -8180,25 +8359,25 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     // so we use writeOperandWithCast here instead of writeOperand. Similarly
     // below for operand 1
     bool foldedConstant = false;
-    if(I.getOpcode() == Instruction::Sub){
-      if(ConstantInt *opnd0 = dyn_cast<ConstantInt>(I.getOperand(0)))
-        if(ConstantInt *opnd1 = dyn_cast<ConstantInt>(I.getOperand(1))){
+    if (I.getOpcode() == Instruction::Sub) {
+      if (ConstantInt *opnd0 = dyn_cast<ConstantInt>(I.getOperand(0)))
+        if (ConstantInt *opnd1 = dyn_cast<ConstantInt>(I.getOperand(1))) {
           foldedConstant = true;
           Out << (opnd0->getSExtValue() - opnd1->getSExtValue());
         }
     }
-    if(!foldedConstant && (I.getOpcode() == Instruction::Add
-        || I.getOpcode() == Instruction::FAdd
-        || I.getOpcode() == Instruction::Mul
-        || I.getOpcode() == Instruction::FMul
-        || I.getOpcode() == Instruction::SDiv
-        || I.getOpcode() == Instruction::UDiv
-        || I.getOpcode() == Instruction::FDiv
-        || I.getOpcode() == Instruction::Sub
-        || I.getOpcode() == Instruction::FSub
-        || I.getOpcode() == Instruction::Shl
-        || I.getOpcode() == Instruction::LShr
-        || I.getOpcode() == Instruction::AShr))
+    if (!foldedConstant && (I.getOpcode() == Instruction::Add ||
+                            I.getOpcode() == Instruction::FAdd ||
+                            I.getOpcode() == Instruction::Mul ||
+                            I.getOpcode() == Instruction::FMul ||
+                            I.getOpcode() == Instruction::SDiv ||
+                            I.getOpcode() == Instruction::UDiv ||
+                            I.getOpcode() == Instruction::FDiv ||
+                            I.getOpcode() == Instruction::Sub ||
+                            I.getOpcode() == Instruction::FSub ||
+                            I.getOpcode() == Instruction::Shl ||
+                            I.getOpcode() == Instruction::LShr ||
+                            I.getOpcode() == Instruction::AShr))
       Out << "(";
     writeOperandWithCast(I.getOperand(0), I.getOpcode());
 
@@ -8248,18 +8427,18 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     }
 
     writeOperandWithCast(I.getOperand(1), I.getOpcode());
-    if(I.getOpcode() == Instruction::Add
-        || I.getOpcode() == Instruction::FAdd
-        || I.getOpcode() == Instruction::Mul
-        || I.getOpcode() == Instruction::FMul
-        || I.getOpcode() == Instruction::SDiv
-        || I.getOpcode() == Instruction::UDiv
-        || I.getOpcode() == Instruction::FDiv
-        || I.getOpcode() == Instruction::Sub
-        || I.getOpcode() == Instruction::FSub
-        || I.getOpcode() == Instruction::Shl
-        || I.getOpcode() == Instruction::LShr
-        || I.getOpcode() == Instruction::AShr)
+    if (I.getOpcode() == Instruction::Add ||
+        I.getOpcode() == Instruction::FAdd ||
+        I.getOpcode() == Instruction::Mul ||
+        I.getOpcode() == Instruction::FMul ||
+        I.getOpcode() == Instruction::SDiv ||
+        I.getOpcode() == Instruction::UDiv ||
+        I.getOpcode() == Instruction::FDiv ||
+        I.getOpcode() == Instruction::Sub ||
+        I.getOpcode() == Instruction::FSub ||
+        I.getOpcode() == Instruction::Shl ||
+        I.getOpcode() == Instruction::LShr ||
+        I.getOpcode() == Instruction::AShr)
       Out << ")";
     if (NeedsClosingParens)
       Out << "))";
@@ -8297,24 +8476,23 @@ void CWriter::visitICmpInst(ICmpInst &I) {
 
   Instruction *op0 = dyn_cast<Instruction>(I.getOperand(0));
   Instruction *op1 = dyn_cast<Instruction>(I.getOperand(1));
-  if(I.isSigned()){
-    if(!op0 || (op0 && signedInsts.find(op0) != signedInsts.end()))
+  if (I.isSigned()) {
+    if (!op0 || (op0 && signedInsts.find(op0) != signedInsts.end()))
       writeOperand(I.getOperand(0));
     else
       writeOperandWithCast(I.getOperand(0), I);
     printCmpOperator(&I);
-    if(!op1 || (op1 && signedInsts.find(op1) != signedInsts.end()))
+    if (!op1 || (op1 && signedInsts.find(op1) != signedInsts.end()))
       writeOperand(I.getOperand(1));
     else
       writeOperandWithCast(I.getOperand(1), I);
-  }
-  else{
-    if(!op0 || (op0 && signedInsts.find(op0) == signedInsts.end()))
+  } else {
+    if (!op0 || (op0 && signedInsts.find(op0) == signedInsts.end()))
       writeOperand(I.getOperand(0));
     else
       writeOperandWithCast(I.getOperand(0), I);
     printCmpOperator(&I);
-    if(!op1 || (op1 && signedInsts.find(op1) == signedInsts.end()))
+    if (!op1 || (op1 && signedInsts.find(op1) == signedInsts.end()))
       writeOperand(I.getOperand(1));
     else
       writeOperandWithCast(I.getOperand(1), I);
@@ -8377,20 +8555,21 @@ void CWriter::visitCastInst(CastInst &I) {
   errs() << "SUSAN: visiting cast: " << I << "\n";
   Type *DstTy = I.getType();
   Type *SrcTy = I.getOperand(0)->getType();
-  if(isa<TruncInst>(&I)){
+  if (isa<TruncInst>(&I)) {
     writeOperand(I.getOperand(0), ContextCasted);
     return;
   }
-  if((isa<ZExtInst>(&I) || isa<SExtInst>(&I)) && isa<IntegerType>(DstTy) && isa<IntegerType>(SrcTy)){
+  if ((isa<ZExtInst>(&I) || isa<SExtInst>(&I)) && isa<IntegerType>(DstTy) &&
+      isa<IntegerType>(SrcTy)) {
     unsigned dstBits = cast<IntegerType>(DstTy)->getBitWidth();
     unsigned srcBits = cast<IntegerType>(SrcTy)->getBitWidth();
 
-    if(srcBits <= 32 && dstBits <= 64){
+    if (srcBits <= 32 && dstBits <= 64) {
       writeOperand(I.getOperand(0), ContextCasted);
       return;
     }
   }
-  if(isa<SIToFPInst>(&I)){
+  if (isa<SIToFPInst>(&I)) {
     Out << '(';
     printTypeName(Out, DstTy);
     Out << ")(";
@@ -8398,11 +8577,12 @@ void CWriter::visitCastInst(CastInst &I) {
     Out << ")";
     return;
   }
-  //skip translating this cast if not needed
+  // skip translating this cast if not needed
   SExtInst *sextinst = dyn_cast<SExtInst>(&I);
-  if(sextinst && declareAsCastedType.find(sextinst) != declareAsCastedType.end()){
-      writeOperand(I.getOperand(0));
-      return;
+  if (sextinst &&
+      declareAsCastedType.find(sextinst) != declareAsCastedType.end()) {
+    writeOperand(I.getOperand(0));
+    return;
   }
 
   if (DstTy->isVectorTy() || SrcTy->isVectorTy() ||
@@ -8464,19 +8644,19 @@ void CWriter::visitSelectInst(SelectInst &I) {
   Out << " : ";
   writeOperand(I.getFalseValue(), ContextCasted);
   Out << ")";
-  //Out << "llvm_select_";
-  //printTypeString(Out, I.getType(), false);
-  //Out << "(";
-  //writeOperand(I.getCondition(), ContextCasted);
-  //Out << ", ";
-  //writeOperand(I.getTrueValue(), ContextCasted);
-  //Out << ", ";
-  //writeOperand(I.getFalseValue(), ContextCasted);
-  //Out << ")";
-  //SelectDeclTypes.insert(I.getType());
-  //cwriter_assert(
-  //    I.getCondition()->getType()->isVectorTy() ==
-  //    I.getType()->isVectorTy()); // TODO: might be scalarty == vectorty
+  // Out << "llvm_select_";
+  // printTypeString(Out, I.getType(), false);
+  // Out << "(";
+  // writeOperand(I.getCondition(), ContextCasted);
+  // Out << ", ";
+  // writeOperand(I.getTrueValue(), ContextCasted);
+  // Out << ", ";
+  // writeOperand(I.getFalseValue(), ContextCasted);
+  // Out << ")";
+  // SelectDeclTypes.insert(I.getType());
+  // cwriter_assert(
+  //     I.getCondition()->getType()->isVectorTy() ==
+  //     I.getType()->isVectorTy()); // TODO: might be scalarty == vectorty
 }
 
 // Returns the macro name or value of the max or min of an integer type
@@ -8854,55 +9034,58 @@ bool CWriter::lowerIntrinsics(Function &F) {
   return LoweredAny;
 }
 
-void CWriter::omp_searchForUsesToDelete(std::set<Value*> values2delete, Function &F){
+void CWriter::omp_searchForUsesToDelete(std::set<Value *> values2delete,
+                                        Function &F) {
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     Instruction *inst = &*I;
     for (unsigned i = 0, e = inst->getNumOperands(); i != e; ++i) {
       Value *opnd = inst->getOperand(i);
-      if(values2delete.find(opnd) != values2delete.end()){
+      if (values2delete.find(opnd) != values2delete.end()) {
         omp_SkipVals.insert(cast<Value>(inst));
       }
     }
   }
 }
 
-void  MallocRelatedToArgInput(Value *argInput, std::set<Value*> doubleMallocs, std::map<Value*, int> &malloc2idx){
-  std::map<int, Value*>gep2Object;
-  std::map<int, int>gep2typeWidth;
-  std::map<int, int>gep2Align;
-  for(auto U : argInput->users()){
-    GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(U);
-    if(!gep) continue;
+void MallocRelatedToArgInput(Value *argInput, std::set<Value *> doubleMallocs,
+                             std::map<Value *, int> &malloc2idx) {
+  std::map<int, Value *> gep2Object;
+  std::map<int, int> gep2typeWidth;
+  std::map<int, int> gep2Align;
+  for (auto U : argInput->users()) {
+    GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(U);
+    if (!gep)
+      continue;
     ConstantInt *constint = dyn_cast<ConstantInt>(gep->getOperand(2));
     auto extractedIdx = constint->getSExtValue();
     StructType *sourceElTy = dyn_cast<StructType>(gep->getSourceElementType());
-    Type* ty = sourceElTy->getElementType(extractedIdx);
-    if(ty->isDoubleTy() || ty->isPointerTy())
+    Type *ty = sourceElTy->getElementType(extractedIdx);
+    if (ty->isDoubleTy() || ty->isPointerTy())
       gep2typeWidth[extractedIdx] = 8;
-    else if(IntegerType *intTy = dyn_cast<IntegerType>(ty))
+    else if (IntegerType *intTy = dyn_cast<IntegerType>(ty))
       gep2typeWidth[extractedIdx] = intTy->getBitWidth() / 8;
 
-    for(auto bitcastU : gep->users())
-      if(BitCastInst *bitcast = dyn_cast<BitCastInst>(bitcastU))
-        for(auto storeU : bitcast->users()){
-          if(StoreInst *store = dyn_cast<StoreInst>(storeU)){
+    for (auto bitcastU : gep->users())
+      if (BitCastInst *bitcast = dyn_cast<BitCastInst>(bitcastU))
+        for (auto storeU : bitcast->users()) {
+          if (StoreInst *store = dyn_cast<StoreInst>(storeU)) {
             gep2Object[extractedIdx] = store->getOperand(0);
             gep2Align[extractedIdx] = store->getAlignment();
-
           }
-      } else if(StoreInst *store = dyn_cast<StoreInst>(bitcastU)){
+        }
+      else if (StoreInst *store = dyn_cast<StoreInst>(bitcastU)) {
         gep2Object[extractedIdx] = store->getOperand(0);
         gep2Align[extractedIdx] = store->getAlignment();
       }
   }
 
-  //figure out the stored location
+  // figure out the stored location
   int currentIdx = 0;
-  for(auto [index, object] : gep2Object){
-    if(currentIdx % gep2Align[index])
+  for (auto [index, object] : gep2Object) {
+    if (currentIdx % gep2Align[index])
       currentIdx = (currentIdx / gep2Align[index] + 1) * gep2Align[index];
-    for(auto mallocInst : doubleMallocs){
-      if(object == mallocInst){
+    for (auto mallocInst : doubleMallocs) {
+      if (object == mallocInst) {
         malloc2idx[mallocInst] = currentIdx;
       }
     }
@@ -8910,28 +9093,32 @@ void  MallocRelatedToArgInput(Value *argInput, std::set<Value*> doubleMallocs, s
   }
 }
 
-void Arg2Args(Value *arg, std::map<Value*, int> &args){
-  for(auto U : arg->users()){
-    Instruction* inst = dyn_cast<Instruction>(U);
-    if(!inst) continue;
-    if(isa<CastInst>(inst)){
-      for(auto ldU : inst->users()){
-        LoadInst* ld = dyn_cast<LoadInst>(ldU);
-        if(!ld) continue;
+void Arg2Args(Value *arg, std::map<Value *, int> &args) {
+  for (auto U : arg->users()) {
+    Instruction *inst = dyn_cast<Instruction>(U);
+    if (!inst)
+      continue;
+    if (isa<CastInst>(inst)) {
+      for (auto ldU : inst->users()) {
+        LoadInst *ld = dyn_cast<LoadInst>(ldU);
+        if (!ld)
+          continue;
         args[ld] = 0;
         errs() << "SUSAN: found load for struct 9084: 0" << *ld << "\n";
       }
     }
 
-    if(GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(inst)){
+    if (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(inst)) {
       ConstantInt *constint = dyn_cast<ConstantInt>(gep->getOperand(1));
       auto argidx = constint->getSExtValue();
-      for(auto castU : gep->users()){
+      for (auto castU : gep->users()) {
         CastInst *cast = dyn_cast<CastInst>(castU);
-        if(!cast) continue;
-        for(auto ldU : cast->users()){
+        if (!cast)
+          continue;
+        for (auto ldU : cast->users()) {
           LoadInst *ld = dyn_cast<LoadInst>(ldU);
-          if(!ld) continue;
+          if (!ld)
+            continue;
           args[ld] = argidx;
           errs() << "SUSAN: argidx: " << argidx << "\n";
           errs() << "Load: " << *ld << "\n";
@@ -8941,18 +9128,18 @@ void Arg2Args(Value *arg, std::map<Value*, int> &args){
   }
 }
 
-void CWriter::findMallocType(Function &F){
-  std::set<Value*> doubleMallocs;
+void CWriter::findMallocType(Function &F) {
+  std::set<Value *> doubleMallocs;
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     Instruction *inst = &*I;
-    if(CallInst *CI = dyn_cast<CallInst>(inst))
-      if(Function *F = CI->getCalledFunction())
-        if(F->getName() == "malloc")
-          for(auto user : CI->users()){
+    if (CallInst *CI = dyn_cast<CallInst>(inst))
+      if (Function *F = CI->getCalledFunction())
+        if (F->getName() == "malloc")
+          for (auto user : CI->users()) {
             BitCastInst *castInst = dyn_cast<BitCastInst>(user);
-            if(castInst){
+            if (castInst) {
               PointerType *ptrTy = dyn_cast<PointerType>(castInst->getDestTy());
-              if(ptrTy && ptrTy->getElementType()->isDoubleTy()){
+              if (ptrTy && ptrTy->getElementType()->isDoubleTy()) {
                 errs() << "SUSAN: found double mallocs! \n";
                 errs() << "malloc:" << *CI << "\n";
                 errs() << "castInst: " << *castInst << "\n";
@@ -8962,22 +9149,23 @@ void CWriter::findMallocType(Function &F){
           }
   }
 
-  for(auto [call, utask] : ompFuncs){
-    int numArgs = std::distance(utask->arg_begin(), utask->arg_end())-2;
-    for(auto idx = 3; idx < numArgs+3; ++idx) {
+  for (auto [call, utask] : ompFuncs) {
+    int numArgs = std::distance(utask->arg_begin(), utask->arg_end()) - 2;
+    for (auto idx = 3; idx < numArgs + 3; ++idx) {
       Value *argInput = call->getArgOperand(idx);
-      //Value *arg = utask->getArg(idx-1);
-      //Hailong Jiang 03/23/2023
-      Value *arg = utask->arg_begin()+(idx-1);
-      PointerType* ptrTy = dyn_cast<PointerType>(argInput->getType());
-      if(ptrTy && isa<StructType>(ptrTy->getPointerElementType())){
-        std::map<Value*, int> malloc2idx, args;
+      // Value *arg = utask->getArg(idx-1);
+      // Hailong Jiang 03/23/2023
+      Value *arg = utask->arg_begin() + (idx - 1);
+      PointerType *ptrTy = dyn_cast<PointerType>(argInput->getType());
+      if (ptrTy && isa<StructType>(ptrTy->getPointerElementType())) {
+        std::map<Value *, int> malloc2idx, args;
         MallocRelatedToArgInput(argInput, doubleMallocs, malloc2idx);
         Arg2Args(arg, args);
-        for(auto [malloc, idx] : malloc2idx){
-          for(auto [ld, idx2] : args){
-            if(idx2 == idx){
-              errs() << "SUSAN: tagged malloc " << *malloc << " with type: " << *ld->getType();
+        for (auto [malloc, idx] : malloc2idx) {
+          for (auto [ld, idx2] : args) {
+            if (idx2 == idx) {
+              errs() << "SUSAN: tagged malloc " << *malloc
+                     << " with type: " << *ld->getType();
               mallocType[malloc] = ld->getType();
             }
           }
@@ -8987,16 +9175,15 @@ void CWriter::findMallocType(Function &F){
   }
 }
 
-bool CWriter::RunAllAnalysis(Function &F){
+bool CWriter::RunAllAnalysis(Function &F) {
   LI = &getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
   PDT = &getAnalysis<PostDominatorTreeWrapperPass>(F).getPostDomTree();
   DT = &getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
   RI = &getAnalysis<RegionInfoPass>(F).getRegionInfo();
   SE = &getAnalysis<ScalarEvolutionWrapperPass>(F).getSE();
-  //RI->dump();
-  // Get rid of intrinsics we can't handle.
+  // RI->dump();
+  //  Get rid of intrinsics we can't handle.
   bool Modified = lowerIntrinsics(F);
-
 
   /*
    * OpenMP: preprosessings
@@ -9004,10 +9191,10 @@ bool CWriter::RunAllAnalysis(Function &F){
   LoopProfiles.clear();
   IRNaming.clear();
   omp_declaredLocals.clear();
-  //declaredLocals.clear();
+  // declaredLocals.clear();
   omp_liveins.clear();
-  if(IS_OPENMP_FUNCTION)
-   omp_preprossesing(F);
+  if (IS_OPENMP_FUNCTION)
+    omp_preprossesing(F);
   preprocessSkippableInsts(F);
   preprocessLoopProfiles(F);
   deadBranches.clear();
@@ -9016,34 +9203,34 @@ bool CWriter::RunAllAnalysis(Function &F){
   DT->recalculate(F);
   SE = &getAnalysis<ScalarEvolutionWrapperPass>(F).getSE();
   LI = &getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
-  //SUSAN: determine whether the function can be compiled without gotos
-  std::set<BasicBlock*> visitedBBs;
-  markIfBranches(F, &visitedBBs); //2
+  // SUSAN: determine whether the function can be compiled without gotos
+  std::set<BasicBlock *> visitedBBs;
+  markIfBranches(F, &visitedBBs); // 2
   markBackEdges(F);
   determineControlFlowTranslationMethod(F);
 
-  for(auto LP : LoopProfiles){
-    if(LP->isOmpLoop) continue;
+  for (auto LP : LoopProfiles) {
+    if (LP->isOmpLoop)
+      continue;
     LP->IV = getInductionVariable(LP->L);
     LP->IVInc = getIVIncrement(LP->L, LP->IV);
     LP->incr = LP->IVInc;
   }
-  //SUSAN: preprocessings
-  //1. mark all the irregular exits of a loop (break/return)
-  //2. find all the branches that can be expressed as if statement before split
-  //3. node splitting on irregular graph
-  //4. identify branches that can be expressed as if statement after split
-  //5. mark each basicblock its number of times to be printed
+  // SUSAN: preprocessings
+  // 1. mark all the irregular exits of a loop (break/return)
+  // 2. find all the branches that can be expressed as if statement before split
+  // 3. node splitting on irregular graph
+  // 4. identify branches that can be expressed as if statement after split
+  // 5. mark each basicblock its number of times to be printed
 
-  markLoopIrregularExits(F); //1
+  markLoopIrregularExits(F); // 1
   markGotoBranches(F);
   preprossesPHIs2Print(F);
-  //NodeSplitting(F); PDT->recalculate(F); //3
-  //markIfBranches(F, &visitedBBs); //4
+  // NodeSplitting(F); PDT->recalculate(F); //3
+  // markIfBranches(F, &visitedBBs); //4
   collectNoneArrayGEPs(F);
   collectVariables2Deref(F);
   collectLateDeclares(F);
-
 
   EliminateDeadInsts(F);
   FindInductionVariableRelationships();
@@ -9053,30 +9240,30 @@ bool CWriter::RunAllAnalysis(Function &F){
   collectNotInlinableBinOps(F);
   findMallocType(F);
 
-   return Modified;
+  return Modified;
 }
 
-Value* CWriter::getKernelDim(CallInst* CI) {
+Value *CWriter::getKernelDim(CallInst *CI) {
   auto *F = CI->getCalledFunction();
-  for(auto &BB: *F) {
-    for(auto &I: BB) {
-      if(I.getMetadata("tulip.cuda.indvar")) {
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (I.getMetadata("tulip.cuda.indvar")) {
         errs() << "YEBIN: FOUND TULIP INDVAR\n";
-        if(auto *branch = dyn_cast<BranchInst>(BB.getTerminator())) {
+        if (auto *branch = dyn_cast<BranchInst>(BB.getTerminator())) {
           errs() << "FOUND BRANCH " << *branch << "\n";
-          if(auto *cond = dyn_cast<CmpInst>(branch->getCondition())) {
+          if (auto *cond = dyn_cast<CmpInst>(branch->getCondition())) {
             errs() << "FOUND COND " << *cond << "\n";
-            Value* limit;
-            if(cond->getOperand(0) == &I)
+            Value *limit;
+            if (cond->getOperand(0) == &I)
               limit = cond->getOperand(1);
             else
               limit = cond->getOperand(0);
 
             errs() << "NUM OPS: " << F->getNumOperands() << "\n";
-            for(auto &arg: F->args()) {
+            for (auto &arg : F->args()) {
               errs() << "YEBIN OPERAND: " << arg << "\n";
               int idx = std::distance(F->arg_begin(), &arg);
-              if(&arg == limit)
+              if (&arg == limit)
                 return CI->getOperand(idx);
             }
           }
@@ -9087,110 +9274,116 @@ Value* CWriter::getKernelDim(CallInst* CI) {
   return nullptr;
 }
 
-void CWriter::runAnalysisOnKernelCaller(Function& F) {
-  assert(F.getMetadata("tulip.cuda.kernel.caller") && "Function does not call CUDA kernel(s)!");
+void CWriter::runAnalysisOnKernelCaller(Function &F) {
+  assert(F.getMetadata("tulip.cuda.kernel.caller") &&
+         "Function does not call CUDA kernel(s)!");
   DevVarDecls.clear();
   KernelCallDims.clear();
   LiveOuts.clear();
-  std::map<CallInst*, std::map<Value*, Value*>> CallArgsMap;
+  std::map<CallInst *, std::map<Value *, Value *>> CallArgsMap;
 
-  for(auto &BB: F) {
-    for(auto &I: BB) {
-      if(auto *CallI = dyn_cast<CallInst>(&I))
-        if(CallI->getCalledFunction()->getMetadata("tulip.cuda.kernel")) {
+  for (auto &BB : F) {
+    for (auto &I : BB) {
+      if (auto *CallI = dyn_cast<CallInst>(&I))
+        if (CallI->getCalledFunction()->getMetadata("tulip.cuda.kernel")) {
           int num = CallI->getCalledFunction()->getName().back() - '0';
           auto *iter = getKernelDim(CallI);
           assert(iter && "Unable to find kernel limit!\n");
-          KernelCallDims[CallI] = std::make_pair(num, std::make_pair("threadsPerBlock", iter));
+          KernelCallDims[CallI] =
+              std::make_pair(num, std::make_pair("threadsPerBlock", iter));
           unsigned i = 0;
-          for(auto& arg: CallI->getCalledFunction()->args()) {
-            auto* op = CallI->getArgOperand(i++);
-            //only need device vars for those passed by reference
-            //TODO: assumes no casting
-            if(Times2Dereference[op]) {
-              DevVarDecls["dev_"+GetValueName(op)] = op;
+          for (auto &arg : CallI->getCalledFunction()->args()) {
+            auto *op = CallI->getArgOperand(i++);
+            // only need device vars for those passed by reference
+            // TODO: assumes no casting
+            if (Times2Dereference[op]) {
+              DevVarDecls["dev_" + GetValueName(op)] = op;
               CallArgsMap[CallI][&arg] = op;
             }
           }
         }
     }
   }
-  for(auto call: KernelCallDims) {
+  for (auto call : KernelCallDims) {
     auto *F = call.first->getCalledFunction();
 
-    for(auto &BB: *F) {
-      for(auto &I: BB) {
-        if(auto *store = dyn_cast<StoreInst>(&I)) {
+    for (auto &BB : *F) {
+      for (auto &I : BB) {
+        if (auto *store = dyn_cast<StoreInst>(&I)) {
           auto Ptr = store->getPointerOperand();
-          while(auto GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+          while (auto GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
             Ptr = GEP->getPointerOperand();
           }
-          if(auto* op = CallArgsMap[call.first][Ptr])
-          //TODO: insert the call inst argument
+          if (auto *op = CallArgsMap[call.first][Ptr])
+            // TODO: insert the call inst argument
             LiveOuts.insert(op);
         }
       }
     }
   }
-  for(auto call: KernelCallDims) {
+  for (auto call : KernelCallDims) {
     auto name = call.first->getCalledFunction()->getName();
-    if(name.contains("cudakernel0")) {
+    if (name.contains("cudakernel0")) {
       auto &C = call.first->getContext();
-      MDNode* MD = MDNode::get(C, MDString::get(C, ""));
+      MDNode *MD = MDNode::get(C, MDString::get(C, ""));
       call.first->setMetadata("tulip.kernel.region.begin", MD);
     }
-    if(name.contains("cudakernel"+std::to_string(KernelCallDims.size()-1))) {
+    if (name.contains("cudakernel" +
+                      std::to_string(KernelCallDims.size() - 1))) {
       auto &C = call.first->getContext();
-      MDNode* MD = MDNode::get(C, MDString::get(C, ""));
+      MDNode *MD = MDNode::get(C, MDString::get(C, ""));
       call.first->setMetadata("tulip.kernel.region.end", MD);
     }
   }
   return;
 }
 
-void CWriter::omp_findInlinedStructInputs(Value* argInput, std::map<int, Value*> &argInputs){
-  std::map<int, Value*>gep2argInput;
-  std::map<int, int>gep2typeWidth;
-  std::map<int, int>gep2Align;
-  for(auto U : argInput->users()){
-    GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(U);
-    BitCastInst* bitcastInst = dyn_cast<BitCastInst>(U);
+void CWriter::omp_findInlinedStructInputs(Value *argInput,
+                                          std::map<int, Value *> &argInputs) {
+  std::map<int, Value *> gep2argInput;
+  std::map<int, int> gep2typeWidth;
+  std::map<int, int> gep2Align;
+  for (auto U : argInput->users()) {
+    GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(U);
+    BitCastInst *bitcastInst = dyn_cast<BitCastInst>(U);
     Instruction *userInst = nullptr;
     int idx = 0;
     Type *ty = nullptr;
-    if(gep){
+    if (gep) {
       userInst = gep;
       ConstantInt *constint = dyn_cast<ConstantInt>(gep->getOperand(2));
       idx = constint->getSExtValue();
-      StructType *sourceElTy = dyn_cast<StructType>(gep->getSourceElementType());
+      StructType *sourceElTy =
+          dyn_cast<StructType>(gep->getSourceElementType());
       ty = sourceElTy->getElementType(idx);
-    }
-    else if(bitcastInst){
+    } else if (bitcastInst) {
       userInst = bitcastInst;
       int idx = 0;
       PointerType *sourcePtrTy = dyn_cast<PointerType>(bitcastInst->getSrcTy());
-      StructType *sourceTy = dyn_cast<StructType>(sourcePtrTy->getPointerElementType());
+      StructType *sourceTy =
+          dyn_cast<StructType>(sourcePtrTy->getPointerElementType());
       ty = sourceTy->getElementType(idx);
-    } else continue;
+    } else
+      continue;
 
-    if(ty->isDoubleTy() || ty->isPointerTy())
+    if (ty->isDoubleTy() || ty->isPointerTy())
       gep2typeWidth[idx] = 8;
-    else if(IntegerType *intTy = dyn_cast<IntegerType>(ty))
+    else if (IntegerType *intTy = dyn_cast<IntegerType>(ty))
       gep2typeWidth[idx] = intTy->getBitWidth() / 8;
 
-    for(auto storeU : userInst->users()){
-      if(StoreInst *store = dyn_cast<StoreInst>(storeU)){
+    for (auto storeU : userInst->users()) {
+      if (StoreInst *store = dyn_cast<StoreInst>(storeU)) {
         errs() << "SUSAN: found store for struct 9066: " << *store << "\n";
         auto originalVal = findOriginalValue(store->getOperand(0));
         errs() << "SUSAN: original Val: " << *originalVal;
         gep2argInput[idx] = originalVal;
         errs() << "SUSAN: alignment: " << store->getAlignment();
         gep2Align[idx] = store->getAlignment();
-      }
-      else if(CastInst *cast = dyn_cast<CastInst>(storeU)){
-        for(auto storeU : cast->users()){
+      } else if (CastInst *cast = dyn_cast<CastInst>(storeU)) {
+        for (auto storeU : cast->users()) {
           StoreInst *store = dyn_cast<StoreInst>(storeU);
-          if(!store) continue;
+          if (!store)
+            continue;
           errs() << "SUSAN: found store for struct 9095: " << *store << "\n";
           gep2argInput[idx] = store->getOperand(0);
           gep2Align[idx] = store->getAlignment();
@@ -9200,16 +9393,16 @@ void CWriter::omp_findInlinedStructInputs(Value* argInput, std::map<int, Value*>
     }
   }
 
-  //figure out the stored location
+  // figure out the stored location
   int smallestIdx = 999;
-  for(auto [idx, argInput] : gep2argInput){
-    if(smallestIdx > idx )
+  for (auto [idx, argInput] : gep2argInput) {
+    if (smallestIdx > idx)
       smallestIdx = idx;
   }
   int currentIdx = smallestIdx;
-  for(auto [idx, argInput] : gep2argInput){
+  for (auto [idx, argInput] : gep2argInput) {
     errs() << "SUSAN: idx: " << idx << "\n";
-    if(currentIdx % gep2Align[idx])
+    if (currentIdx % gep2Align[idx])
       currentIdx = (currentIdx / gep2Align[idx] + 1) * gep2Align[idx];
 
     errs() << "SUSAN: currIdx 9609: " << currentIdx << "\n";
@@ -9219,45 +9412,50 @@ void CWriter::omp_findInlinedStructInputs(Value* argInput, std::map<int, Value*>
   }
 }
 
-
-void CWriter::omp_findCorrespondingUsesOfStruct(Value* arg, std::map<int, Value*> &args){
+void CWriter::omp_findCorrespondingUsesOfStruct(Value *arg,
+                                                std::map<int, Value *> &args) {
   errs() << "SUSAN: trying to find corresponding uses: " << *arg << "\n";
-  for(auto U : arg->users()){
-    Instruction* inst = dyn_cast<Instruction>(U);
-    if(!inst) continue;
-    if(isa<CastInst>(inst)){
-      for(auto ldU : inst->users()){
-        LoadInst* ld = dyn_cast<LoadInst>(ldU);
-        if(!ld) continue;
+  for (auto U : arg->users()) {
+    Instruction *inst = dyn_cast<Instruction>(U);
+    if (!inst)
+      continue;
+    if (isa<CastInst>(inst)) {
+      for (auto ldU : inst->users()) {
+        LoadInst *ld = dyn_cast<LoadInst>(ldU);
+        if (!ld)
+          continue;
         args[0] = ld;
         errs() << "SUSAN: found load for struct 9084: 0" << *ld << "\n";
       }
     }
-    if(GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(inst)){
+    if (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(inst)) {
       ConstantInt *constint = dyn_cast<ConstantInt>(gep->getOperand(1));
       auto argidx = constint->getSExtValue();
-      for(auto castU : gep->users()){
+      for (auto castU : gep->users()) {
         CastInst *cast = dyn_cast<CastInst>(castU);
-        if(!cast) continue;
-        for(auto ldU : cast->users()){
+        if (!cast)
+          continue;
+        for (auto ldU : cast->users()) {
           LoadInst *ld = dyn_cast<LoadInst>(ldU);
 
-          if(!ld) continue;
+          if (!ld)
+            continue;
           args[argidx] = ld;
           errs() << "SUSAN: argidx: " << argidx << "\n";
           errs() << "Load: " << *ld << "\n";
 
-          if(PointerType *ptrTy = dyn_cast<PointerType>(cast->getDestTy())){
-            if(PointerType *elPtrTy =
-                dyn_cast<PointerType>(ptrTy->getPointerElementType())){
-              if(elPtrTy->getPointerElementType()->isDoubleTy())
+          if (PointerType *ptrTy = dyn_cast<PointerType>(cast->getDestTy())) {
+            if (PointerType *elPtrTy =
+                    dyn_cast<PointerType>(ptrTy->getPointerElementType())) {
+              if (elPtrTy->getPointerElementType()->isDoubleTy())
                 valuesCast2Double.insert(ld);
             }
           }
 
-          for(auto ldValU : ld->users()){
+          for (auto ldValU : ld->users()) {
             LoadInst *ldVal = dyn_cast<LoadInst>(ldValU);
-            if(!ldVal) continue;
+            if (!ldVal)
+              continue;
             addressExposedLoads.insert(ldVal);
           }
         }
@@ -9266,30 +9464,26 @@ void CWriter::omp_findCorrespondingUsesOfStruct(Value* arg, std::map<int, Value*
   }
 }
 
-void CWriter::inlineNameForArg(Value* argInput, Value* arg){
+void CWriter::inlineNameForArg(Value *argInput, Value *arg) {
   auto argName = GetValueName(argInput);
 
-
-  if(ConstantInt* constant = dyn_cast<ConstantInt>(argInput)){
-    inlinedArgNames[arg] = std::to_string(constant->getSExtValue()) ;
-  }
-  else if(ConstantFP* constant = dyn_cast<ConstantFP>(argInput)){
-    inlinedArgNames[arg] = ftostr(constant->getValueAPF()) ;
-  }
-  else if(declaredLocals.find(argName) == declaredLocals.end()){
-      if(Instruction *argInputInst = dyn_cast<Instruction>(argInput)){
-          if(!isa<CastInst>(argInputInst)){
-            errs() << "SUSAN: inlining argInput: " << *argInput << "\n";
-            errs() << "SUSAN: inlining arg: " << *arg << "\n";
-            printTypeName(Out, argInputInst->getType(), false) << ' ';
-            Out << GetValueName(argInputInst,true) << " = ";
-            writeInstComputationInline(*argInputInst);
-            Out << ";\n";
-          }
+  if (ConstantInt *constant = dyn_cast<ConstantInt>(argInput)) {
+    inlinedArgNames[arg] = std::to_string(constant->getSExtValue());
+  } else if (ConstantFP *constant = dyn_cast<ConstantFP>(argInput)) {
+    inlinedArgNames[arg] = ftostr(constant->getValueAPF());
+  } else if (declaredLocals.find(argName) == declaredLocals.end()) {
+    if (Instruction *argInputInst = dyn_cast<Instruction>(argInput)) {
+      if (!isa<CastInst>(argInputInst)) {
+        errs() << "SUSAN: inlining argInput: " << *argInput << "\n";
+        errs() << "SUSAN: inlining arg: " << *arg << "\n";
+        printTypeName(Out, argInputInst->getType(), false) << ' ';
+        Out << GetValueName(argInputInst, true) << " = ";
+        writeInstComputationInline(*argInputInst);
+        Out << ";\n";
       }
+    }
     inlinedArgNames[arg] = argName;
-  }
-  else{
+  } else {
     inlinedArgNames[arg] = argName;
   }
 }
@@ -9297,31 +9491,35 @@ void CWriter::inlineNameForArg(Value* argInput, Value* arg){
 void CWriter::visitCallInst(CallInst &I) {
   CurInstr = &I;
 
-  //skip barrier
-  if(Function *F = I.getCalledFunction())
-    if(F->getName() == "__kmpc_barrier") return;
+  // skip barrier
+  if (Function *F = I.getCalledFunction())
+    if (F->getName() == "__kmpc_barrier")
+      return;
 
-  if(I.getMetadata("tulip.kernel.region.begin")) {
-    for(auto devVar: DevVarDecls) {
+  if (I.getMetadata("tulip.kernel.region.begin")) {
+    for (auto devVar : DevVarDecls) {
       Out << *devVar.second->getType() << " " << devVar.first << ";\n";
     }
     Out << "\n";
-    //FIXME: make sure deref is correct
-    //FIXME: assuming type is not safe...
-    //TODO: how to get size across functions?
-    for(auto devVar: DevVarDecls) {
-      auto* ty = devVar.second->getType();
-      if(auto ptrTy = dyn_cast<PointerType>(ty))
+    // FIXME: make sure deref is correct
+    // FIXME: assuming type is not safe...
+    // TODO: how to get size across functions?
+    for (auto devVar : DevVarDecls) {
+      auto *ty = devVar.second->getType();
+      if (auto ptrTy = dyn_cast<PointerType>(ty))
         ty = ptrTy->getPointerElementType();
-      Out << "cudaMalloc(&" << devVar.first << ", " << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
+      Out << "cudaMalloc(&" << devVar.first << ", " << "size_"
+          << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
     }
     Out << "\n";
-    for(auto devVar: DevVarDecls) {
-      auto* ty = devVar.second->getType();
-      if(auto ptrTy = dyn_cast<PointerType>(ty))
+    for (auto devVar : DevVarDecls) {
+      auto *ty = devVar.second->getType();
+      if (auto ptrTy = dyn_cast<PointerType>(ty))
         ty = ptrTy->getPointerElementType();
-      Out << "cudaMemcpy(" << devVar.first << ", " << GetValueName(devVar.second) << ", " 
-      << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyHostToDevice);\n";
+      Out << "cudaMemcpy(" << devVar.first << ", "
+          << GetValueName(devVar.second) << ", "
+          << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty
+          << "), " << "cudaMemcpyHostToDevice);\n";
     }
     Out << "\n";
   }
@@ -9329,183 +9527,184 @@ void CWriter::visitCallInst(CallInst &I) {
   /*
    * OpenMP: skip omp runtime call
    */
-  if(ompFuncs.find(&I) != ompFuncs.end()){
-      Out << "//START OUTLINED\n";
-      Out << "  #pragma omp parallel \n" << "{\n";
-      // Create a Call to omp_outlined
-      auto utask = ompFuncs[&I];
+  if (ompFuncs.find(&I) != ompFuncs.end()) {
+    Out << "//START OUTLINED\n";
+    Out << "  #pragma omp parallel \n" << "{\n";
+    // Create a Call to omp_outlined
+    auto utask = ompFuncs[&I];
 
-      inlinedArgNames.clear();
-      // build arg->argInput table
-      int numArgs = std::distance(utask->arg_begin(), utask->arg_end())-2;
-      for(auto idx = 3; idx < numArgs+3; ++idx) {
-        Value *argInput = I.getArgOperand(idx);
-        //Value *arg = utask->getArg(idx-1);
-        //Hailong Jiang 03/23/2023
-        Value *arg = utask->arg_begin()+(idx-1);
-        errs() << "SUSAN: argInput: " << *argInput << "\n";
-        errs() << "SUSAN: arg: " << *arg << "\n";
+    inlinedArgNames.clear();
+    // build arg->argInput table
+    int numArgs = std::distance(utask->arg_begin(), utask->arg_end()) - 2;
+    for (auto idx = 3; idx < numArgs + 3; ++idx) {
+      Value *argInput = I.getArgOperand(idx);
+      // Value *arg = utask->getArg(idx-1);
+      // Hailong Jiang 03/23/2023
+      Value *arg = utask->arg_begin() + (idx - 1);
+      errs() << "SUSAN: argInput: " << *argInput << "\n";
+      errs() << "SUSAN: arg: " << *arg << "\n";
 
-
-        if(isAddressExposed(argInput)){
-          for (inst_iterator I = inst_begin(utask), E = inst_end(utask); I != E; ++I) {
-            if(!isa<LoadInst>(&*I)) continue;
-            LoadInst* ldInst = cast<LoadInst>(&*I);
-            if(ldInst->getPointerOperand() == arg)
-              addressExposedLoads.insert(ldInst);
-          }
+      if (isAddressExposed(argInput)) {
+        for (inst_iterator I = inst_begin(utask), E = inst_end(utask); I != E;
+             ++I) {
+          if (!isa<LoadInst>(&*I))
+            continue;
+          LoadInst *ldInst = cast<LoadInst>(&*I);
+          if (ldInst->getPointerOperand() == arg)
+            addressExposedLoads.insert(ldInst);
         }
+      }
 
-        //unroll structs
-        PointerType* ptrTy = dyn_cast<PointerType>(argInput->getType());
-        if(ptrTy && isa<StructType>(ptrTy->getPointerElementType())){
-            std::map<int, Value*> argInputs, args;
-            omp_findInlinedStructInputs(argInput, argInputs);
-            omp_findCorrespondingUsesOfStruct(arg, args);
-            for(auto [idx, arg] : args){
-              auto argInput = argInputs[idx];
-              if(!argInput){
-                errs() << "SUSAN: didn't find argInput for idx: " << idx << "\n";
-                continue;
-              }
-              PointerType* ptrTy = dyn_cast<PointerType>(argInput->getType());
-              if(!ptrTy)
-                valuesCast2Double.erase(arg);
-              if(ptrTy && ptrTy->getPointerElementType()->isDoubleTy()
-                  && valuesCast2Double.find(arg) != valuesCast2Double.end())
-                valuesCast2Double.erase(arg);
+      // unroll structs
+      PointerType *ptrTy = dyn_cast<PointerType>(argInput->getType());
+      if (ptrTy && isa<StructType>(ptrTy->getPointerElementType())) {
+        std::map<int, Value *> argInputs, args;
+        omp_findInlinedStructInputs(argInput, argInputs);
+        omp_findCorrespondingUsesOfStruct(arg, args);
+        for (auto [idx, arg] : args) {
+          auto argInput = argInputs[idx];
+          if (!argInput) {
+            errs() << "SUSAN: didn't find argInput for idx: " << idx << "\n";
+            continue;
+          }
+          PointerType *ptrTy = dyn_cast<PointerType>(argInput->getType());
+          if (!ptrTy)
+            valuesCast2Double.erase(arg);
+          if (ptrTy && ptrTy->getPointerElementType()->isDoubleTy() &&
+              valuesCast2Double.find(arg) != valuesCast2Double.end())
+            valuesCast2Double.erase(arg);
 
-              inlineNameForArg(argInput, arg);
-            }
-        } else {
-          if(auto alloca = isDirectAlloca(argInput))
-            for(auto user : alloca->users())
-              if(StoreInst *store = dyn_cast<StoreInst>(user))
-                if(store->getPointerOperand() == alloca)
-                  argInput = store->getOperand(0);
-          errs() << "SUSAN: argInput updated:" << *argInput << "\n";
           inlineNameForArg(argInput, arg);
         }
+      } else {
+        if (auto alloca = isDirectAlloca(argInput))
+          for (auto user : alloca->users())
+            if (StoreInst *store = dyn_cast<StoreInst>(user))
+              if (store->getPointerOperand() == alloca)
+                argInput = store->getOperand(0);
+        errs() << "SUSAN: argInput updated:" << *argInput << "\n";
+        inlineNameForArg(argInput, arg);
       }
+    }
 
-      /*Out << "  " << GetValueName(utask) << "(";
+    /*Out << "  " << GetValueName(utask) << "(";
 
-      int numArgs = std::distance(utask->arg_begin(), utask->arg_end()) - 2;
-      bool printComma = false;
-      for(auto idx = 3; idx < 3+numArgs; ++idx) {
-        if (printComma)
-          Out << ", ";
-        Value *arg = I.getArgOperand(idx);
-        writeOperand(arg, ContextCasted);
-        printComma = true;
-      }
-      Out << ");\n";
-      */
-      //directly inline omp_outlined function
-      //1. save all the data that current function has
-      auto IS_OPENMP_FUNCTION_SAVE = IS_OPENMP_FUNCTION;
-      auto LoopProfiles_s = LoopProfiles;
-      auto omp_liveins_s = omp_liveins;
-      auto omp_SkipVals_s = omp_SkipVals;
-      auto deleteAndReplaceInsts_s = deleteAndReplaceInsts;
-      auto deadBranches_s = deadBranches;
-      auto ifBranches_s = ifBranches;
-      auto backEdges_s = backEdges;
-      auto topRegion_s = topRegion;
-      auto times2bePrinted_s = times2bePrinted;
-      auto returnDominated_s = returnDominated;
-      auto irregularLoopExits_s = irregularLoopExits;
-      auto gotoBranches_s = gotoBranches;
-      auto PHIValues2Print_s = PHIValues2Print;
-      auto InstsToReplaceByPhi_s = InstsToReplaceByPhi;
-      auto NoneArrayGEPs_s = NoneArrayGEPs;
-      auto Times2Dereference_s = Times2Dereference;
-      auto deadInsts_s = deadInsts;
-      auto IVMap_s = IVMap;
-      auto addParenthesis_s = addParenthesis;
-      auto phiVars_s = phiVars;
-      auto allVars_s = allVars;
-      auto accessGEPMemory_s = accessGEPMemory;
-      auto GEPPointers_s = GEPPointers;
-      auto currValue2DerefCnt_s = currValue2DerefCnt;
-      auto printLabels_s = printLabels;
-      auto loopCondCalls_s = loopCondCalls;
-      auto CBERegionMap_s = CBERegionMap;
-      auto recordedRegionBBs_s = recordedRegionBBs;
-      auto gepStart_s = gepStart;
-      auto NATURAL_CONTROL_FLOW_S = NATURAL_CONTROL_FLOW;
-      auto signedInsts_s = signedInsts;
-      auto declareAsCastedType_s = declareAsCastedType;
-      auto ompFuncs_s = ompFuncs;
-      auto GEPNeedsReference_s = GEPNeedsReference;
-      auto omp_declarePrivate_s = omp_declarePrivate;
-      auto IVInc2IV_s = IVInc2IV;
-      auto UpperBoundArgs_s = UpperBoundArgs;
-      auto IRNaming_s = IRNaming;
-      auto CurLoop_s = CurLoop;
-      auto CurInstr_s = CurInstr;
-      //auto toDeclareLocal_s = toDeclareLocal;
+    int numArgs = std::distance(utask->arg_begin(), utask->arg_end()) - 2;
+    bool printComma = false;
+    for(auto idx = 3; idx < 3+numArgs; ++idx) {
+      if (printComma)
+        Out << ", ";
+      Value *arg = I.getArgOperand(idx);
+      writeOperand(arg, ContextCasted);
+      printComma = true;
+    }
+    Out << ");\n";
+    */
+    // directly inline omp_outlined function
+    // 1. save all the data that current function has
+    auto IS_OPENMP_FUNCTION_SAVE = IS_OPENMP_FUNCTION;
+    auto LoopProfiles_s = LoopProfiles;
+    auto omp_liveins_s = omp_liveins;
+    auto omp_SkipVals_s = omp_SkipVals;
+    auto deleteAndReplaceInsts_s = deleteAndReplaceInsts;
+    auto deadBranches_s = deadBranches;
+    auto ifBranches_s = ifBranches;
+    auto backEdges_s = backEdges;
+    auto topRegion_s = topRegion;
+    auto times2bePrinted_s = times2bePrinted;
+    auto returnDominated_s = returnDominated;
+    auto irregularLoopExits_s = irregularLoopExits;
+    auto gotoBranches_s = gotoBranches;
+    auto PHIValues2Print_s = PHIValues2Print;
+    auto InstsToReplaceByPhi_s = InstsToReplaceByPhi;
+    auto NoneArrayGEPs_s = NoneArrayGEPs;
+    auto Times2Dereference_s = Times2Dereference;
+    auto deadInsts_s = deadInsts;
+    auto IVMap_s = IVMap;
+    auto addParenthesis_s = addParenthesis;
+    auto phiVars_s = phiVars;
+    auto allVars_s = allVars;
+    auto accessGEPMemory_s = accessGEPMemory;
+    auto GEPPointers_s = GEPPointers;
+    auto currValue2DerefCnt_s = currValue2DerefCnt;
+    auto printLabels_s = printLabels;
+    auto loopCondCalls_s = loopCondCalls;
+    auto CBERegionMap_s = CBERegionMap;
+    auto recordedRegionBBs_s = recordedRegionBBs;
+    auto gepStart_s = gepStart;
+    auto NATURAL_CONTROL_FLOW_S = NATURAL_CONTROL_FLOW;
+    auto signedInsts_s = signedInsts;
+    auto declareAsCastedType_s = declareAsCastedType;
+    auto ompFuncs_s = ompFuncs;
+    auto GEPNeedsReference_s = GEPNeedsReference;
+    auto omp_declarePrivate_s = omp_declarePrivate;
+    auto IVInc2IV_s = IVInc2IV;
+    auto UpperBoundArgs_s = UpperBoundArgs;
+    auto IRNaming_s = IRNaming;
+    auto CurLoop_s = CurLoop;
+    auto CurInstr_s = CurInstr;
+    // auto toDeclareLocal_s = toDeclareLocal;
 
-      //inline the function
-      IS_OPENMP_FUNCTION = true;
-      RunAllAnalysis(*utask);
-      findDoubleGEP(*utask);
-      // Output all floating point constants that cannot be printed accurately.
-      printFloatingPointConstants(*utask);
-      printFunction(*utask, true);
+    // inline the function
+    IS_OPENMP_FUNCTION = true;
+    RunAllAnalysis(*utask);
+    findDoubleGEP(*utask);
+    // Output all floating point constants that cannot be printed accurately.
+    printFloatingPointConstants(*utask);
+    printFunction(*utask, true);
 
-      IS_OPENMP_FUNCTION = IS_OPENMP_FUNCTION_SAVE;
-      LoopProfiles = LoopProfiles_s;
-      omp_liveins = omp_liveins_s;
-      omp_SkipVals = omp_SkipVals_s;
-      deleteAndReplaceInsts = deleteAndReplaceInsts_s;
-      deadBranches = deadBranches_s;
-      ifBranches = ifBranches_s;
-      backEdges = backEdges_s;
-      topRegion = topRegion_s;
-      times2bePrinted = times2bePrinted_s;
-      returnDominated = returnDominated_s;
-      irregularLoopExits = irregularLoopExits_s;
-      gotoBranches = gotoBranches_s;
-      PHIValues2Print = PHIValues2Print_s;
-      InstsToReplaceByPhi = InstsToReplaceByPhi_s;
-      NoneArrayGEPs = NoneArrayGEPs_s;
-      Times2Dereference = Times2Dereference_s;
-      deadInsts = deadInsts_s;
-      IVMap = IVMap_s;
-      addParenthesis = addParenthesis_s;
-      phiVars = phiVars_s;
-      allVars = allVars_s;
-      accessGEPMemory = accessGEPMemory_s;
-      GEPPointers = GEPPointers_s;
-      currValue2DerefCnt = currValue2DerefCnt_s;
-      printLabels = printLabels_s;
-      loopCondCalls = loopCondCalls_s;
-      CBERegionMap = CBERegionMap_s;
-      recordedRegionBBs = recordedRegionBBs_s;
-      gepStart = gepStart_s;
-      NATURAL_CONTROL_FLOW = NATURAL_CONTROL_FLOW_S;
-      signedInsts = signedInsts_s;
-      declareAsCastedType = declareAsCastedType_s;
-      ompFuncs = ompFuncs_s;
-      GEPNeedsReference = GEPNeedsReference_s;
-      omp_declarePrivate = omp_declarePrivate_s;
-      IVInc2IV = IVInc2IV_s;
-      UpperBoundArgs = UpperBoundArgs_s;
-      IRNaming = IRNaming_s;
-      CurLoop = CurLoop_s;
-      CurInstr = CurInstr_s;
-      Function* F = I.getParent()->getParent();
-      LI = &getAnalysis<LoopInfoWrapperPass>(*F).getLoopInfo();
-      PDT = &getAnalysis<PostDominatorTreeWrapperPass>(*F).getPostDomTree();
-      DT = &getAnalysis<DominatorTreeWrapperPass>(*F).getDomTree();
-      RI = &getAnalysis<RegionInfoPass>(*F).getRegionInfo();
-      SE = &getAnalysis<ScalarEvolutionWrapperPass>(*F).getSE();
-      //toDeclareLocal = toDeclareLocal_s;
+    IS_OPENMP_FUNCTION = IS_OPENMP_FUNCTION_SAVE;
+    LoopProfiles = LoopProfiles_s;
+    omp_liveins = omp_liveins_s;
+    omp_SkipVals = omp_SkipVals_s;
+    deleteAndReplaceInsts = deleteAndReplaceInsts_s;
+    deadBranches = deadBranches_s;
+    ifBranches = ifBranches_s;
+    backEdges = backEdges_s;
+    topRegion = topRegion_s;
+    times2bePrinted = times2bePrinted_s;
+    returnDominated = returnDominated_s;
+    irregularLoopExits = irregularLoopExits_s;
+    gotoBranches = gotoBranches_s;
+    PHIValues2Print = PHIValues2Print_s;
+    InstsToReplaceByPhi = InstsToReplaceByPhi_s;
+    NoneArrayGEPs = NoneArrayGEPs_s;
+    Times2Dereference = Times2Dereference_s;
+    deadInsts = deadInsts_s;
+    IVMap = IVMap_s;
+    addParenthesis = addParenthesis_s;
+    phiVars = phiVars_s;
+    allVars = allVars_s;
+    accessGEPMemory = accessGEPMemory_s;
+    GEPPointers = GEPPointers_s;
+    currValue2DerefCnt = currValue2DerefCnt_s;
+    printLabels = printLabels_s;
+    loopCondCalls = loopCondCalls_s;
+    CBERegionMap = CBERegionMap_s;
+    recordedRegionBBs = recordedRegionBBs_s;
+    gepStart = gepStart_s;
+    NATURAL_CONTROL_FLOW = NATURAL_CONTROL_FLOW_S;
+    signedInsts = signedInsts_s;
+    declareAsCastedType = declareAsCastedType_s;
+    ompFuncs = ompFuncs_s;
+    GEPNeedsReference = GEPNeedsReference_s;
+    omp_declarePrivate = omp_declarePrivate_s;
+    IVInc2IV = IVInc2IV_s;
+    UpperBoundArgs = UpperBoundArgs_s;
+    IRNaming = IRNaming_s;
+    CurLoop = CurLoop_s;
+    CurInstr = CurInstr_s;
+    Function *F = I.getParent()->getParent();
+    LI = &getAnalysis<LoopInfoWrapperPass>(*F).getLoopInfo();
+    PDT = &getAnalysis<PostDominatorTreeWrapperPass>(*F).getPostDomTree();
+    DT = &getAnalysis<DominatorTreeWrapperPass>(*F).getDomTree();
+    RI = &getAnalysis<RegionInfoPass>(*F).getRegionInfo();
+    SE = &getAnalysis<ScalarEvolutionWrapperPass>(*F).getSE();
+    // toDeclareLocal = toDeclareLocal_s;
 
-      Out << "}\n";
-      Out << "//END OUTLINED\n";
-      return;
+    Out << "}\n";
+    Out << "//END OUTLINED\n";
+    return;
   }
 
   if (isa<InlineAsm>(I.getCalledOperand()))
@@ -9533,8 +9732,8 @@ void CWriter::visitCallInst(CallInst &I) {
     Out << " = ";
   }
 
-  //if (I.isTailCall())
-  //  Out << " /*tail*/ ";
+  // if (I.isTailCall())
+  //   Out << " /*tail*/ ";
 
   // If this is an indirect call to a struct return function, we need to cast
   // the pointer. Ditto for indirect calls with byval arguments.
@@ -9576,7 +9775,7 @@ void CWriter::visitCallInst(CallInst &I) {
   // TODO: add grid/block to IR and use those
   // TODO: add dim3 before function delcaration
   Function *F = I.getCalledFunction();
-  if(F && F->getName().contains("cudakernel")) {
+  if (F && F->getName().contains("cudakernel")) {
     std::string num = std::to_string(KernelCallDims[&I].first);
     Out << "<<<grid" << num << ", block" << num << ">>>";
   }
@@ -9613,7 +9812,7 @@ void CWriter::visitCallInst(CallInst &I) {
     if (PrintedArg)
       Out << ", ";
     if (ArgNo < NumDeclaredParams &&
-        (*AI)->getType() != FTy->getParamType(ArgNo)) {//type casting
+        (*AI)->getType() != FTy->getParamType(ArgNo)) { // type casting
       Out << '(';
       printTypeNameUnaligned(
           Out, FTy->getParamType(ArgNo),
@@ -9627,21 +9826,23 @@ void CWriter::visitCallInst(CallInst &I) {
       writeOperand(*AI, ContextCasted);
     PrintedArg = true;
   }
-  if(isEmptyType(I.getType()))
+  if (isEmptyType(I.getType()))
     Out << ");\n";
   else
     Out << ")";
 
-  if(I.getMetadata("tulip.kernel.region.end")) {
+  if (I.getMetadata("tulip.kernel.region.end")) {
     Out << "\n";
-    for(auto devVar: DevVarDecls) {
-      //FIXME: use writeOperand instead of GetValueName directly
-      if(LiveOuts.count(devVar.second)) {
-        auto* ty = devVar.second->getType();
-        if(auto ptrTy = dyn_cast<PointerType>(ty))
+    for (auto devVar : DevVarDecls) {
+      // FIXME: use writeOperand instead of GetValueName directly
+      if (LiveOuts.count(devVar.second)) {
+        auto *ty = devVar.second->getType();
+        if (auto ptrTy = dyn_cast<PointerType>(ty))
           ty = ptrTy->getPointerElementType();
-        Out << "cudaMemcpy(" << GetValueName(devVar.second) << ", " << devVar.first << ", " 
-      << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyDeviceToHost);\n";
+        Out << "cudaMemcpy(" << GetValueName(devVar.second) << ", "
+            << devVar.first << ", "
+            << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty
+            << "), " << "cudaMemcpyDeviceToHost);\n";
       }
     }
   }
@@ -10053,52 +10254,53 @@ void CWriter::visitAllocaInst(AllocaInst &I) {
   Out << "))";
 }
 
-
-Value* CWriter::findUnderlyingObject(Value *Ptr){
-  if(!Ptr) return Ptr;
-  if(!(isa<GetElementPtrInst>(Ptr) || isa<ConstantExpr>(Ptr)))
-    if(Times2Dereference.find(Ptr) != Times2Dereference.end())
+Value *CWriter::findUnderlyingObject(Value *Ptr) {
+  if (!Ptr)
+    return Ptr;
+  if (!(isa<GetElementPtrInst>(Ptr) || isa<ConstantExpr>(Ptr)))
+    if (Times2Dereference.find(Ptr) != Times2Dereference.end())
       return Ptr;
 
-  if(isa<GetElementPtrInst>(Ptr)){
+  if (isa<GetElementPtrInst>(Ptr)) {
     Value *nextPtr = Ptr;
-    while(GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(nextPtr)){
+    while (GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(nextPtr)) {
       nextPtr = gepInst->getPointerOperand();
     }
 
-    if(Times2Dereference.find(nextPtr) != Times2Dereference.end()) return nextPtr;
+    if (Times2Dereference.find(nextPtr) != Times2Dereference.end())
+      return nextPtr;
 
-    if(CastInst *castInst= dyn_cast<CastInst>(nextPtr)){
+    if (CastInst *castInst = dyn_cast<CastInst>(nextPtr)) {
       Value *obj = castInst->getOperand(0);
-      if(Times2Dereference.find(obj) != Times2Dereference.end()) return obj;
-    }
-    else if(LoadInst *ldInst = dyn_cast<LoadInst>(nextPtr)){
+      if (Times2Dereference.find(obj) != Times2Dereference.end())
+        return obj;
+    } else if (LoadInst *ldInst = dyn_cast<LoadInst>(nextPtr)) {
       Value *obj = ldInst->getOperand(0);
-      if(Times2Dereference.find(obj) != Times2Dereference.end()) return obj;
+      if (Times2Dereference.find(obj) != Times2Dereference.end())
+        return obj;
     }
-
 
   } else {
     ConstantExpr *expr = dyn_cast<ConstantExpr>(Ptr);
     Value *UO = nullptr;
     assert(expr && "SUSAN: finding UO of a non GEP constant expression?\n");
 
-    while(expr && expr->getOpcode() == Instruction::GetElementPtr){
+    while (expr && expr->getOpcode() == Instruction::GetElementPtr) {
       UO = expr->getOperand(0);
-      expr =  dyn_cast<ConstantExpr>(UO);
+      expr = dyn_cast<ConstantExpr>(UO);
     }
 
-    if(Times2Dereference.find(UO) != Times2Dereference.end()) return UO;
+    if (Times2Dereference.find(UO) != Times2Dereference.end())
+      return UO;
   }
 
-  //shouldn't reach here...
+  // shouldn't reach here...
   return nullptr;
-
-
 }
 
 bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
-                                 gep_type_iterator E, bool accessMemory, bool printReference) {
+                                       gep_type_iterator E, bool accessMemory,
+                                       bool printReference) {
   // If there are no indices, just print out the pointer.
   if (I == E) {
     writeOperand(Ptr);
@@ -10114,8 +10316,6 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
       LastIndexIsVector = dyn_cast<VectorType>(TmpI.getIndexedType());
   }
 
-
-
   // If the last index is into a vector, we can't print it as &a[i][j] because
   // we can't index into a vector with j in GCC.  Instead, emit this as
   // (((float*)&a[i])+j)
@@ -10128,23 +10328,22 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
     Out << ")(";
   }
 
-
-  if(gepStart){
+  if (gepStart) {
     Value *UO = findUnderlyingObject(Ptr);
-    currValue2DerefCnt = std::pair<Value*, int>(UO, Times2Dereference[UO]);
+    currValue2DerefCnt = std::pair<Value *, int>(UO, Times2Dereference[UO]);
   }
 
-  if(!accessMemory && gepStart){
-    //check every gep whether there is a deference operation
+  if (!accessMemory && gepStart) {
+    // check every gep whether there is a deference operation
     bool dereferenced = false;
     auto it = I;
     Type *idxType = it.getIndexedType();
-    if(isa<StructType>(idxType) && (++it != E)){
+    if (isa<StructType>(idxType) && (++it != E)) {
       dereferenced = true;
     }
     it = I;
-    if(isa<ArrayType>(idxType)){
-      if((++it != E) && !isConstantNull(it.getOperand()))
+    if (isa<ArrayType>(idxType)) {
+      if ((++it != E) && !isConstantNull(it.getOperand()))
         dereferenced = true;
     }
     /*GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(Ptr);
@@ -10157,78 +10356,80 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
       gepInst = dyn_cast<GetElementPtrInst>(gepInst->getPointerOperand());
     }*/
 
-    if(dereferenced)
+    if (dereferenced)
       Out << '&';
   }
 
-  std::set<Value*>NegOpnd;
+  std::set<Value *> NegOpnd;
 
-  //check if there are negative indexes
+  // check if there are negative indexes
   auto it = I;
   for (; it != E; ++it) {
     Value *Opnd = it.getOperand();
-    if(ConstantInt *intOpnd = dyn_cast<ConstantInt>(Opnd))
-      if(intOpnd->getSExtValue() < 0)
+    if (ConstantInt *intOpnd = dyn_cast<ConstantInt>(Opnd))
+      if (intOpnd->getSExtValue() < 0)
         NegOpnd.insert(intOpnd);
   }
 
   Type *IntoT = I.getIndexedType();
   Value *FirstOp = I.getOperand();
-  if( printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)) )
+  if (printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)))
     Out << "(&";
 
-  bool currGEPisPointer = !(isa<GetElementPtrInst>(Ptr) || isa<AllocaInst>(Ptr) || isa<GlobalVariable>(Ptr));
-  //first index
+  bool currGEPisPointer = !(isa<GetElementPtrInst>(Ptr) ||
+                            isa<AllocaInst>(Ptr) || isa<GlobalVariable>(Ptr));
+  // first index
   bool flattened3D = false;
-  int  nextSize = 0;
-  if(isa<StructType>(IntoT) || isa<ArrayType>(IntoT)){
-    //if it's a struct or array, whether it's pointer or not, first index is offset and zero can be eliminated
-    errs() <<  "SUSAN: first index is struct or array type\n";
-    if(!isConstantNull(FirstOp)){
+  int nextSize = 0;
+  if (isa<StructType>(IntoT) || isa<ArrayType>(IntoT)) {
+    // if it's a struct or array, whether it's pointer or not, first index is
+    // offset and zero can be eliminated
+    errs() << "SUSAN: first index is struct or array type\n";
+    if (!isConstantNull(FirstOp)) {
       Out << '(';
       writeOperandInternal(Ptr, ContextNormal, false);
-      if(!isNegative(FirstOp)){
+      if (!isNegative(FirstOp)) {
         Out << '+';
-        if(ArrayType *arrTy = dyn_cast<ArrayType>(IntoT)){
+        if (ArrayType *arrTy = dyn_cast<ArrayType>(IntoT)) {
           auto size = arrTy->getNumElements();
           Out << size << "*";
-          if(ArrayType *elemArrTy = dyn_cast<ArrayType>(arrTy->getElementType())){
+          if (ArrayType *elemArrTy =
+                  dyn_cast<ArrayType>(arrTy->getElementType())) {
             nextSize = elemArrTy->getNumElements();
             Out << size << "*";
             flattened3D = true;
           }
         }
         writeOperand(FirstOp);
-        if(!flattened3D)
+        if (!flattened3D)
           Out << ')';
-      }
-      else{
+      } else {
         errs() << "SUSAN: found negative int" << *FirstOp << "\n";
         writeOperand(FirstOp);
         Out << ')';
       }
-    }
-    else{
-      errs() <<  "SUSAN: printing Ptr 9975 " << *Ptr << "\n";
+    } else {
+      errs() << "SUSAN: printing Ptr 9975 " << *Ptr << "\n";
       writeOperandInternal(Ptr, ContextNormal, false);
     }
-  }
-  else if(isa<IntegerType>(IntoT) || isa<PointerType>(IntoT) || IntoT->isDoubleTy() || IntoT->isFloatTy()){
-    errs() <<  "SUSAN: first index is integer/pointertype type\n";
-    //if indexed type is an integer, it means accessing an array, or a block of allocated memory
-    if(accessMemory){
-      //if index is negative, it's treated as a block of memory, and should be translated as *(x-offset) (Hofstadter-Q-sequence)
-      if(currValue2DerefCnt.second){
+  } else if (isa<IntegerType>(IntoT) || isa<PointerType>(IntoT) ||
+             IntoT->isDoubleTy() || IntoT->isFloatTy()) {
+    errs() << "SUSAN: first index is integer/pointertype type\n";
+    // if indexed type is an integer, it means accessing an array, or a block of
+    // allocated memory
+    if (accessMemory) {
+      // if index is negative, it's treated as a block of memory, and should be
+      // translated as *(x-offset) (Hofstadter-Q-sequence)
+      if (currValue2DerefCnt.second) {
         errs() << "SUSAN: writing ptr 10000:" << *Ptr << "\n";
         currValue2DerefCnt.second--;
-        if(NegOpnd.find(FirstOp) != NegOpnd.end()){
+        if (NegOpnd.find(FirstOp) != NegOpnd.end()) {
           Out << "*(";
           writeOperandInternal(Ptr, ContextNormal, false);
           Out << '+';
           writeOperand(FirstOp);
           Out << ')';
-        }
-        else{
+        } else {
           errs() << "SUSAN: writing ptr 9994: " << *Ptr << "\n";
           writeOperandInternal(Ptr, ContextNormal, false);
           Out << '[';
@@ -10236,43 +10437,36 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
           Out << ']';
         }
         currGEPisPointer = false;
-      }
-      else{
+      } else {
         Out << '(';
         writeOperandInternal(Ptr, ContextNormal, false);
         Out << '+';
         writeOperand(FirstOp);
         Out << ')';
       }
-    }
-    else{
+    } else {
 
-
-      if(!isConstantNull(FirstOp) && !printReference){
+      if (!isConstantNull(FirstOp) && !printReference) {
         errs() << "SUSAN: writing ptr 10029:" << *Ptr << "\n";
         Out << '(';
         writeOperandInternal(Ptr, ContextNormal, false);
         Out << '+';
         writeOperand(FirstOp);
         Out << ')';
-      }
-      else{
+      } else {
         writeOperandInternal(Ptr, ContextNormal, false);
       }
-
-
     }
-  }
-  else{
+  } else {
     assert(0 && "vector type not supported\n");
   }
 
   I++;
 
-  //check if previous GEP operand is a pointer
+  // check if previous GEP operand is a pointer
   bool prevGEPisPointer = false;
-  if(GetElementPtrInst *prevGEP = dyn_cast<GetElementPtrInst>(Ptr)){
-    if(GEPPointers.find(prevGEP) != GEPPointers.end()){
+  if (GetElementPtrInst *prevGEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+    if (GEPPointers.find(prevGEP) != GEPPointers.end()) {
       prevGEPisPointer = true;
     }
   }
@@ -10281,145 +10475,147 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
   Type *prevType = IntoT;
   for (; I != E; ++I) {
     Value *Opnd = I.getOperand();
-    if(isa<ArrayType>(prevType)){
-      if(accessMemory){
-        if(flattened3D){
+    if (isa<ArrayType>(prevType)) {
+      if (accessMemory) {
+        if (flattened3D) {
           Out << "+" << nextSize << "*";
           writeOperand(Opnd);
           Out << ')';
-          flattened3D=false;
-        }
-        else{
+          flattened3D = false;
+        } else {
           Out << "[";
           writeOperand(Opnd);
           Out << ']';
           isPointer = false;
         }
-      } else if(!isConstantNull(Opnd)) {
-        if(currValue2DerefCnt.second){
+      } else if (!isConstantNull(Opnd)) {
+        if (currValue2DerefCnt.second) {
           errs() << "SUSAN: 10062: " << *Opnd << "\n";
           currValue2DerefCnt.second--;
           Out << '[';
           writeOperand(Opnd);
           Out << ']';
           isPointer = false;
-        }
-        else{
-          assert( 0 && "SUSAN: dereferencing more than expected?\n");
+        } else {
+          assert(0 && "SUSAN: dereferencing more than expected?\n");
         }
       }
-    }
-    else if(isa<StructType>(prevType)){
+    } else if (isa<StructType>(prevType)) {
       auto *StrTy = dyn_cast<StructType>(prevType);
       errs() << "SUSAN: is StructType 10074\n";
       // YEBIN: change field names to support FIXME
-      if(accessMemory){
-        //if(currValue2DerefCnt.second){
-          //errs() << "SUSAN: is StructType 10079\n";
-          //currValue2DerefCnt.second--;
-          if(isPointer)
-            Out << "->"+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
-          else
-            Out << "."+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
-          isPointer = false;
+      if (accessMemory) {
+        // if(currValue2DerefCnt.second){
+        // errs() << "SUSAN: is StructType 10079\n";
+        // currValue2DerefCnt.second--;
+        if (isPointer)
+          Out << "->" + getFieldName(StrTy)
+              << cast<ConstantInt>(Opnd)->getZExtValue();
+        else
+          Out << "." + getFieldName(StrTy)
+              << cast<ConstantInt>(Opnd)->getZExtValue();
+        isPointer = false;
         //}
-        //else{
+        // else{
         //  assert( 0 && "SUSAN: dereferencing more than expected?\n");
         //}
-      } else{
-        if(isPointer)
-          Out << "->"+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
+      } else {
+        if (isPointer)
+          Out << "->" + getFieldName(StrTy)
+              << cast<ConstantInt>(Opnd)->getZExtValue();
         else
-          Out << "."+getFieldName(StrTy) << cast<ConstantInt>(Opnd)->getZExtValue();
+          Out << "." + getFieldName(StrTy)
+              << cast<ConstantInt>(Opnd)->getZExtValue();
         isPointer = false;
       }
-    }
-    else{
+    } else {
       assert(0 && "vector type not supported\n");
     }
     prevType = I.getIndexedType();
   }
 
-  if( printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)) )
+  if (printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)))
     Out << ")";
   return isPointer;
 
- // if (!isConstantNull(FirstOp)) {
- //   writeOperand(Ptr);
- //   Out << '[';
- //   writeOperandWithCast(FirstOp, Instruction::GetElementPtr);
- //   Out << ']';
- // } else {
- //   // When the first index is 0 (very common) we can simplify it.
- //   if (isAddressExposed(Ptr)) {
- //     // Print P rather than (&P)[0]
- //     writeOperandInternal(Ptr);
- //   } else if (I != E && I.isStruct()) {
- //     // If the second index is a struct index, print P->f instead of P[0].f
- //     writeOperand(Ptr);
- //     Out << "->field" << cast<ConstantInt>(I.getOperand())->getZExtValue();
- //     // Eat the struct index
- //     IntoT = I.getIndexedType();
- //     ++I;
- //   } else {
- //     // Print (*P)[1] instead of P[0][1] (more idiomatic)
- //     Out << "(*";
- //     writeOperand(Ptr);
- //     Out << ")";
- //   }
- // }
+  // if (!isConstantNull(FirstOp)) {
+  //   writeOperand(Ptr);
+  //   Out << '[';
+  //   writeOperandWithCast(FirstOp, Instruction::GetElementPtr);
+  //   Out << ']';
+  // } else {
+  //   // When the first index is 0 (very common) we can simplify it.
+  //   if (isAddressExposed(Ptr)) {
+  //     // Print P rather than (&P)[0]
+  //     writeOperandInternal(Ptr);
+  //   } else if (I != E && I.isStruct()) {
+  //     // If the second index is a struct index, print P->f instead of P[0].f
+  //     writeOperand(Ptr);
+  //     Out << "->field" << cast<ConstantInt>(I.getOperand())->getZExtValue();
+  //     // Eat the struct index
+  //     IntoT = I.getIndexedType();
+  //     ++I;
+  //   } else {
+  //     // Print (*P)[1] instead of P[0][1] (more idiomatic)
+  //     Out << "(*";
+  //     writeOperand(Ptr);
+  //     Out << ")";
+  //   }
+  // }
 
- // for (; I != E; ++I) {
- //   Value *Opnd = I.getOperand();
+  // for (; I != E; ++I) {
+  //   Value *Opnd = I.getOperand();
 
- //   cwriter_assert(
- //       Opnd
- //           ->getType()
- //           ->isIntegerTy()); // TODO: indexing a Vector with a Vector is valid,
- //                             // but we don't support it here
+  //   cwriter_assert(
+  //       Opnd
+  //           ->getType()
+  //           ->isIntegerTy()); // TODO: indexing a Vector with a Vector is
+  //           valid,
+  //                             // but we don't support it here
 
- //   if (I.isStruct()) {
- //     Out << ".field" << cast<ConstantInt>(Opnd)->getZExtValue();
- //   } else if (IntoT->isArrayTy()) {
- //     // Zero-element array types are either skipped or, for pointers, peeled
- //     // off by skipEmptyArrayTypes. In this latter case, we can translate
- //     // zero-element array indexing as pointer arithmetic.
- //     if (IntoT->getArrayNumElements() == 0) {
- //       if (!isConstantNull(Opnd)) {
- //         // TODO: The operator precedence here is only correct if there are no
- //         //       subsequent indexable types other than zero-element arrays.
- //         cwriter_assert(skipEmptyArrayTypes(IntoT)->isSingleValueType());
- //         Out << " + (";
- //         writeOperandWithCast(Opnd, Instruction::GetElementPtr);
- //         Out << ')';
- //       }
- //     } else {
- //       Out << ".array[";
- //       writeOperandWithCast(Opnd, Instruction::GetElementPtr);
- //       Out << ']';
- //     }
- //   } else if (!IntoT->isVectorTy()) {
- //     Out << '[';
- //     writeOperandWithCast(Opnd, Instruction::GetElementPtr);
- //     Out << ']';
- //   } else {
- //     // If the last index is into a vector, then print it out as "+j)".  This
- //     // works with the 'LastIndexIsVector' code above.
- //     if (!isConstantNull(Opnd)) {
- //       Out << "))"; // avoid "+0".
- //     } else {
- //       Out << ")+(";
- //       writeOperandWithCast(I.getOperand(), Instruction::GetElementPtr);
- //       Out << "))";
- //     }
- //   }
+  //   if (I.isStruct()) {
+  //     Out << ".field" << cast<ConstantInt>(Opnd)->getZExtValue();
+  //   } else if (IntoT->isArrayTy()) {
+  //     // Zero-element array types are either skipped or, for pointers, peeled
+  //     // off by skipEmptyArrayTypes. In this latter case, we can translate
+  //     // zero-element array indexing as pointer arithmetic.
+  //     if (IntoT->getArrayNumElements() == 0) {
+  //       if (!isConstantNull(Opnd)) {
+  //         // TODO: The operator precedence here is only correct if there are
+  //         no
+  //         //       subsequent indexable types other than zero-element arrays.
+  //         cwriter_assert(skipEmptyArrayTypes(IntoT)->isSingleValueType());
+  //         Out << " + (";
+  //         writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+  //         Out << ')';
+  //       }
+  //     } else {
+  //       Out << ".array[";
+  //       writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+  //       Out << ']';
+  //     }
+  //   } else if (!IntoT->isVectorTy()) {
+  //     Out << '[';
+  //     writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+  //     Out << ']';
+  //   } else {
+  //     // If the last index is into a vector, then print it out as "+j)". This
+  //     // works with the 'LastIndexIsVector' code above.
+  //     if (!isConstantNull(Opnd)) {
+  //       Out << "))"; // avoid "+0".
+  //     } else {
+  //       Out << ")+(";
+  //       writeOperandWithCast(I.getOperand(), Instruction::GetElementPtr);
+  //       Out << "))";
+  //     }
+  //   }
 
- //   IntoT = I.getIndexedType();
- // }
+  //   IntoT = I.getIndexedType();
+  // }
 }
 
 void CWriter::printGEPExpressionArray(Value *Ptr, gep_type_iterator I,
-                                 gep_type_iterator E,  bool accessMemory) {
+                                      gep_type_iterator E, bool accessMemory) {
 
   // If there are no indices, just print out the pointer.
   if (I == E) {
@@ -10436,7 +10632,7 @@ void CWriter::printGEPExpressionArray(Value *Ptr, gep_type_iterator I,
       LastIndexIsVector = dyn_cast<VectorType>(TmpI.getIndexedType());
   }
 
-  //Out << "(";
+  // Out << "(";
 
   // If the last index is into a vector, we can't print it as &a[i][j] because
   // we can't index into a vector with j in GCC.  Instead, emit this as
@@ -10450,7 +10646,6 @@ void CWriter::printGEPExpressionArray(Value *Ptr, gep_type_iterator I,
     Out << ")(";
   }
 
-
   Type *IntoT = I.getIndexedType();
 
   // The first index of a GEP is special. It does pointer arithmetic without
@@ -10459,14 +10654,14 @@ void CWriter::printGEPExpressionArray(Value *Ptr, gep_type_iterator I,
   IntoT = I.getIndexedType();
   ++I;
   if (!isConstantNull(FirstOp)) {
-    //if it's just pointer operation then translates as ptr+1
-    if(!accessMemory){
+    // if it's just pointer operation then translates as ptr+1
+    if (!accessMemory) {
       writeOperand(Ptr);
       Out << " + ";
       writeOperand(FirstOp, ContextCasted);
     }
-    //if it access memory, then translates as ptr[1]
-    else{
+    // if it access memory, then translates as ptr[1]
+    else {
       writeOperand(Ptr);
       Out << "[";
       writeOperand(FirstOp, ContextCasted);
@@ -10474,46 +10669,46 @@ void CWriter::printGEPExpressionArray(Value *Ptr, gep_type_iterator I,
     }
 
   } else {
-      writeOperandInternal(Ptr);
+    writeOperandInternal(Ptr);
   }
 
-  //if(accessMemory){
+  // if(accessMemory){
   for (; I != E; ++I) {
     Value *Opnd = I.getOperand();
 
     cwriter_assert(
-        Opnd
-            ->getType()
+        Opnd->getType()
             ->isIntegerTy()); // TODO: indexing a Vector with a Vector is valid,
                               // but we don't support it here
 
     if (IntoT->isArrayTy()) {
-      if(accessMemory){
-         // Zero-element array types are either skipped or, for pointers, peeled
-         // off by skipEmptyArrayTypes. In this latter case, we can translate
-         // zero-element array indexing as pointer arithmetic.
-         if (IntoT->getArrayNumElements() == 0) {
-           if (!isConstantNull(Opnd)) {
-             // TODO: The operator precedence here is only correct if there are no
-             //       subsequent indexable types other than zero-element arrays.
-             cwriter_assert(skipEmptyArrayTypes(IntoT)->isSingleValueType());
-             Out << " + (";
-             writeOperandWithCast(Opnd, Instruction::GetElementPtr);
-             Out << ')';
-           }
-         } else {
-           Out << "[";
-           writeOperandWithCast(Opnd, Instruction::GetElementPtr);
-           Out << ']';
+      if (accessMemory) {
+        // Zero-element array types are either skipped or, for pointers, peeled
+        // off by skipEmptyArrayTypes. In this latter case, we can translate
+        // zero-element array indexing as pointer arithmetic.
+        if (IntoT->getArrayNumElements() == 0) {
+          if (!isConstantNull(Opnd)) {
+            // TODO: The operator precedence here is only correct if there are
+            // no
+            //       subsequent indexable types other than zero-element arrays.
+            cwriter_assert(skipEmptyArrayTypes(IntoT)->isSingleValueType());
+            Out << " + (";
+            writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+            Out << ')';
+          }
+        } else {
+          Out << "[";
+          writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+          Out << ']';
 
-           GetElementPtrInst* gepPtr = dyn_cast<GetElementPtrInst>(Ptr);
-           while(gepPtr){
-             Opnd = gepPtr->getOperand(2);
-             Out << "[";
-             writeOperandWithCast(Opnd, Instruction::GetElementPtr);
-             Out << ']';
-             gepPtr = dyn_cast<GetElementPtrInst>(gepPtr->getPointerOperand());
-           }
+          GetElementPtrInst *gepPtr = dyn_cast<GetElementPtrInst>(Ptr);
+          while (gepPtr) {
+            Opnd = gepPtr->getOperand(2);
+            Out << "[";
+            writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+            Out << ']';
+            gepPtr = dyn_cast<GetElementPtrInst>(gepPtr->getPointerOperand());
+          }
         }
       }
     } else if (!IntoT->isVectorTy()) {
@@ -10535,7 +10730,7 @@ void CWriter::printGEPExpressionArray(Value *Ptr, gep_type_iterator I,
     IntoT = I.getIndexedType();
   }
   //}
-  //Out << ")";
+  // Out << ")";
 }
 
 void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
@@ -10543,13 +10738,13 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
 
   GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(Operand);
 
-  if(gepInst){
-    errs() <<  "SUSAN: GEPINST: " << *gepInst << "\n";
+  if (gepInst) {
+    errs() << "SUSAN: GEPINST: " << *gepInst << "\n";
     Value *UO = findUnderlyingObject(gepInst->getPointerOperand());
     int dereferenceTimes = Times2Dereference[UO];
     errs() << "SUSAN: dereferenceTimes = " << dereferenceTimes << "\n";
-    while (gepInst){
-      if(!dereferenceTimes){
+    while (gepInst) {
+      if (!dereferenceTimes) {
         GEPNeedsReference.insert(gepInst);
       }
 
@@ -10562,14 +10757,13 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     return;
   }
 
-
   if (isAddressExposed(Operand) && !IsVolatile) {
     writeOperandInternal(Operand);
     return;
   }
 
   bool IsUnaligned =
-    Alignment && Alignment < TD->getABITypeAlignment(OperandType);
+      Alignment && Alignment < TD->getABITypeAlignment(OperandType);
 
   if (!IsUnaligned) {
     Out << '*';
@@ -10578,8 +10772,7 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
       printTypeName(Out, OperandType, false);
       Out << "*)";
     }
-  }
-  else if (IsUnaligned) {
+  } else if (IsUnaligned) {
     headerUseUnalignedLoad();
     Out << "__UNALIGNED_LOAD__(";
     printTypeNameUnaligned(Out, OperandType, false);
@@ -10594,12 +10787,11 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     Out << ")";
   }
 
+  // bool IsUnaligned =
+  //     Alignment && Alignment < TD->getABITypeAlignment(OperandType);
 
-  //bool IsUnaligned =
-  //    Alignment && Alignment < TD->getABITypeAlignment(OperandType);
-
-  //if (!IsUnaligned) {
-   // Out << '*';
+  // if (!IsUnaligned) {
+  //  Out << '*';
   //  if (IsVolatile) {
   //    Out << "(volatile ";
   //    printTypeName(Out, OperandType, false);
@@ -10615,19 +10807,17 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     Out << ", " << Alignment << ", ";
   }*/
 
-
-
-  //if (IsUnaligned) {
-  //  Out << ")";
-  //}
+  // if (IsUnaligned) {
+  //   Out << ")";
+  // }
 }
 
 void CWriter::visitLoadInst(LoadInst &I) {
-  //errs() << "SUSAN: curinstr before loadinst: " << *CurInstr << "\n";
+  // errs() << "SUSAN: curinstr before loadinst: " << *CurInstr << "\n";
   CurInstr = &I;
   errs() << "SUSAN: loadInst: " << I << "\n";
 
-  if(doubleGeps.find(&I) != doubleGeps.end()){
+  if (doubleGeps.find(&I) != doubleGeps.end()) {
     GetElementPtrInst *gep = cast<GetElementPtrInst>(I.getPointerOperand());
     GetElementPtrInst *gep2 = cast<GetElementPtrInst>(gep->getPointerOperand());
     auto ptrVal = gep2->getPointerOperand();
@@ -10636,34 +10826,34 @@ void CWriter::visitLoadInst(LoadInst &I) {
 
     auto firstIdx = gep->getOperand(1);
     Out << "[";
-    if(ConstantInt *idx = dyn_cast<ConstantInt>(firstIdx))
+    if (ConstantInt *idx = dyn_cast<ConstantInt>(firstIdx))
       Out << idx->getSExtValue();
-   else
+    else
       writeOperand(firstIdx);
 
     auto secondIdx = gep2->getOperand(1);
     Out << "+";
-    if(ConstantInt *idx = dyn_cast<ConstantInt>(secondIdx))
+    if (ConstantInt *idx = dyn_cast<ConstantInt>(secondIdx))
       Out << idx->getSExtValue();
-   else
+    else
       writeOperand(secondIdx);
 
-   Out << "]";
-   return;
+    Out << "]";
+    return;
   }
   // for omp inlining struct
-  if(inlinedArgNames.find(&I) != inlinedArgNames.end()){
+  if (inlinedArgNames.find(&I) != inlinedArgNames.end()) {
     Out << inlinedArgNames[&I];
-    if(valuesCast2Double.find(&I) != valuesCast2Double.end())
+    if (valuesCast2Double.find(&I) != valuesCast2Double.end())
       Out << "((double*)";
     errs() << "SUSAN: printing inlined name: " << inlinedArgNames[&I];
-    if(valuesCast2Double.find(&I) != valuesCast2Double.end())
+    if (valuesCast2Double.find(&I) != valuesCast2Double.end())
       Out << ")";
     return;
   }
 
   // for omp inlining
-  if(addressExposedLoads.find(&I) != addressExposedLoads.end()){
+  if (addressExposedLoads.find(&I) != addressExposedLoads.end()) {
     errs() << "SUSAN: printing inlined load: " << I << "\n";
     return writeOperand(I.getPointerOperand());
   }
@@ -10679,34 +10869,34 @@ void CWriter::visitStoreInst(StoreInst &I) {
   AllocaInst *noneSkipAlloca = nullptr;
 
   auto gep = dyn_cast<GetElementPtrInst>(I.getPointerOperand());
-  std::stack<GetElementPtrInst*> geps;
-  while(gep){
+  std::stack<GetElementPtrInst *> geps;
+  while (gep) {
     geps.push(gep);
     noneSkipAlloca = dyn_cast<AllocaInst>(gep->getPointerOperand());
     gep = dyn_cast<GetElementPtrInst>(gep->getPointerOperand());
   }
 
-  //if(noneSkipAlloca){
-  //  Out << GetValueName(noneSkipAlloca);
-  //  while(!geps.empty()){
-  //    auto gep = geps.top();
-  //    errs() << "SUSAN: printing noneSkipAlloca: " << *gep << "\n";
-  //    geps.pop();
-  //    Out << '[';
-  //    int idx = 0;
-  //    std::vector<Value*>vals2write;
-  //    for(unsigned int i =1; i!=gep->getNumOperands(); i++){
-  //      if(ConstantInt *constInt = dyn_cast<ConstantInt>(gep->getOperand(i)))
-  //        idx += constInt->getSExtValue();
-  //      if(Instruction *inst = dyn_cast<Instruction>(gep->getOperand(i))){
-  //        if(inst->getOpcode() == Instruction::Mul)
-  //          vals2write.push_back(inst->getOperand(0));
-  //        else
-  //          vals2write.push_back(inst);
-  //      } else {
-  //        vals2write.push_back(gep->getOperand(i));
-  //      }
-  //    }
+  // if(noneSkipAlloca){
+  //   Out << GetValueName(noneSkipAlloca);
+  //   while(!geps.empty()){
+  //     auto gep = geps.top();
+  //     errs() << "SUSAN: printing noneSkipAlloca: " << *gep << "\n";
+  //     geps.pop();
+  //     Out << '[';
+  //     int idx = 0;
+  //     std::vector<Value*>vals2write;
+  //     for(unsigned int i =1; i!=gep->getNumOperands(); i++){
+  //       if(ConstantInt *constInt = dyn_cast<ConstantInt>(gep->getOperand(i)))
+  //         idx += constInt->getSExtValue();
+  //       if(Instruction *inst = dyn_cast<Instruction>(gep->getOperand(i))){
+  //         if(inst->getOpcode() == Instruction::Mul)
+  //           vals2write.push_back(inst->getOperand(0));
+  //         else
+  //           vals2write.push_back(inst);
+  //       } else {
+  //         vals2write.push_back(gep->getOperand(i));
+  //       }
+  //     }
 
   //    writeOperand(vals2write[0]);
   //    for (auto it = begin(vals2write)+1; it != end(vals2write); ++it) {
@@ -10720,13 +10910,11 @@ void CWriter::visitStoreInst(StoreInst &I) {
   //  }
   //} else if(doubleGeps.find(&I) != doubleGeps.end()){
   //  GetElementPtrInst *gep = cast<GetElementPtrInst>(I.getPointerOperand());
-  //  GetElementPtrInst *gep2 = cast<GetElementPtrInst>(gep->getPointerOperand());
-  //  auto ptrVal = gep2->getPointerOperand();
-  //  Out << GetValueName(ptrVal);
-  //  auto firstIdx = gep->getOperand(1);
-  //  errs() << "SUSAN: gep 10928: " << *gep << "\n";
-  //  errs() << "SUSAN:writing first index: "<< *firstIdx << "\n";
-  //  Out << "[";
+  //  GetElementPtrInst *gep2 =
+  //  cast<GetElementPtrInst>(gep->getPointerOperand()); auto ptrVal =
+  //  gep2->getPointerOperand(); Out << GetValueName(ptrVal); auto firstIdx =
+  //  gep->getOperand(1); errs() << "SUSAN: gep 10928: " << *gep << "\n"; errs()
+  //  << "SUSAN:writing first index: "<< *firstIdx << "\n"; Out << "[";
   //  if(ConstantInt *idx = dyn_cast<ConstantInt>(firstIdx))
   //    Out << idx->getSExtValue();
   // else
@@ -10741,7 +10929,7 @@ void CWriter::visitStoreInst(StoreInst &I) {
 
   // Out << "]";
   //}
-  //else{
+  // else{
 
   errs() << "CBackend: here? 10442\n";
   writeMemoryAccess(I.getPointerOperand(), I.getOperand(0)->getType(),
@@ -10795,55 +10983,59 @@ void CWriter::visitFenceInst(FenceInst &I) {
   Out << ");\n";
 }
 
-bool CWriter::GEPAccessesMemory(GetElementPtrInst *I){
-   if(accessGEPMemory.find(I) != accessGEPMemory.end()) return true;
+bool CWriter::GEPAccessesMemory(GetElementPtrInst *I) {
+  if (accessGEPMemory.find(I) != accessGEPMemory.end())
+    return true;
 
-   for (User *U : I->users()) {
-     if (LoadInst *memInst = dyn_cast<LoadInst>(U)) {
-       if(memInst->getOperand(0) == cast<Value>(I)){
-         accessGEPMemory.insert(I);
-         return true;
-       }
-     }
-     else if(StoreInst *memInst = dyn_cast<StoreInst>(U)){
-       if(memInst->getOperand(1) == cast<Value>(I)){
-         accessGEPMemory.insert(I);
-         return true;
-       }
-     }
-     else if(GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(U)){
-       if(gepInst->getPointerOperand() == cast<Value>(I))
-         return GEPAccessesMemory(gepInst);
-     }
-   }
+  for (User *U : I->users()) {
+    if (LoadInst *memInst = dyn_cast<LoadInst>(U)) {
+      if (memInst->getOperand(0) == cast<Value>(I)) {
+        accessGEPMemory.insert(I);
+        return true;
+      }
+    } else if (StoreInst *memInst = dyn_cast<StoreInst>(U)) {
+      if (memInst->getOperand(1) == cast<Value>(I)) {
+        accessGEPMemory.insert(I);
+        return true;
+      }
+    } else if (GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(U)) {
+      if (gepInst->getPointerOperand() == cast<Value>(I))
+        return GEPAccessesMemory(gepInst);
+    }
+  }
 
-   return false;
+  return false;
 }
 
 void CWriter::visitGetElementPtrInst(GetElementPtrInst &I) {
   CurInstr = &I;
   bool accessMemory = false;
-  if(accessGEPMemory.find(&I) != accessGEPMemory.end()) accessMemory = true;
+  if (accessGEPMemory.find(&I) != accessGEPMemory.end())
+    accessMemory = true;
 
-//  bool prevGEPisPointer = false;
-//  if(GetElementPtrInst *prevGEP = dyn_cast<GetElementPtrInst>(I.getPointerOperand())){
-//    if(GEPPointers.find(prevGEP) != GEPPointers.end())
-//      prevGEPisPointer = true;
-//  }
+  //  bool prevGEPisPointer = false;
+  //  if(GetElementPtrInst *prevGEP =
+  //  dyn_cast<GetElementPtrInst>(I.getPointerOperand())){
+  //    if(GEPPointers.find(prevGEP) != GEPPointers.end())
+  //      prevGEPisPointer = true;
+  //  }
 
   errs() << "SUSAN: printing GEP: " << I << "\n";
   bool printReference = false;
-  if(GEPNeedsReference.find(&I) != GEPNeedsReference.end())
+  if (GEPNeedsReference.find(&I) != GEPNeedsReference.end())
     printReference = true;
 
-  if(accessMemory)
+  if (accessMemory)
     errs() << "SUSAN: accessMemory true\n";
 
-  if(printReference)
+  if (printReference)
     errs() << "SUSAN: printReference true\n";
 
-  bool currGEPisPointer = printGEPExpressionStruct(I.getPointerOperand(), gep_type_begin(I), gep_type_end(I), accessMemory, printReference);
-  if(currGEPisPointer) GEPPointers.insert(&I);
+  bool currGEPisPointer =
+      printGEPExpressionStruct(I.getPointerOperand(), gep_type_begin(I),
+                               gep_type_end(I), accessMemory, printReference);
+  if (currGEPisPointer)
+    GEPPointers.insert(&I);
 }
 
 void CWriter::visitVAArgInst(VAArgInst &I) {
@@ -11011,4 +11203,3 @@ LLVM_ATTRIBUTE_NORETURN void CWriter::errorWithMessage(const char *message) {
 }
 
 } // namespace llvm_cbe
-
