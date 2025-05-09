@@ -6403,7 +6403,6 @@ void CWriter::findSignedInsts(Instruction *inst, Instruction *signedInst) {
 void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
                                    bool &isDeclared,
                                    std::set<std::string> &declaredLocals) {
-
   if (AllocaInst *AI = isDirectAlloca(I)) {
     auto varName = GetValueName(AI);
     if (declaredLocals.find(varName) != declaredLocals.end())
@@ -6448,6 +6447,7 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
     PrintedVar = true;
     isDeclared = true;
   } else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
+    errs() << "YEBIN: WE ARE HERE FOR " << *I << "\n";
 
     ///*
     // * OpenMP: skip some declarations related to OpenMP calls
@@ -6640,7 +6640,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
     }
   }
 
-  errs() << "=========================SUSAN: IR NAMING "
+  errs() << "=========================" << F.getName() << ": IR NAMING "
             "BEFORE=====================\n";
   for (auto inst2var : IRNaming) {
     errs() << *inst2var.first << " -> " << inst2var.second << "\n";
@@ -6813,7 +6813,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
     IRNaming.erase(deletePair);
   }
 
-  errs() << "=========================SUSAN: IR NAMING=====================\n";
+  errs() << "=========================" << F.getName() << ": IR NAMING=====================\n";
   for (auto inst2var : IRNaming) {
     errs() << *inst2var.first << " -> " << inst2var.second << "\n";
   }
@@ -6877,8 +6877,9 @@ void CWriter::printFunction(Function &F, bool inlineF) {
   bool isDeclared = false;
   if (!IS_OPENMP_FUNCTION) {
     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-      if (!canDeclareLocalLate(*I))
+      if (!canDeclareLocalLate(*I)) {
         DeclareLocalVariable(&*I, PrintedVar, isDeclared, declaredLocals);
+      }
     }
   }
 
