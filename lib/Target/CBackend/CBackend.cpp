@@ -31,6 +31,8 @@
 #include "TopologicalSorter.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 
 #include <cstdlib>
@@ -4737,6 +4739,8 @@ void CWriter::generateHeader(Module &M) {
 
   findOMPFunctions(M);
 
+  // size_t Function_Order_ID = 0;
+
   for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
     /*
      * OpenMP: skip declaring kmpc functions
@@ -4815,8 +4819,6 @@ void CWriter::generateHeader(Module &M) {
         errs() << "ANDREW: Intrinsic: ptx mul24 hit\n";
         intrinsicsToDefine.push_back(&*I);
         continue;
-
-
       }
     }
 
@@ -4861,7 +4863,9 @@ void CWriter::generateHeader(Module &M) {
       }
 
     if (!printedOmpDec) {
-      printFunctionProto(Out, &*I);
+    //   Out << "__FIXME__FUNCTION_ORDER_ID__" << Function_Order_ID << '\n';
+    //   ++Function_Order_ID;
+       printFunctionProto(Out, &*I);
     }
 
     printFunctionAttributes(Out, I->getAttributes());
@@ -6818,13 +6822,17 @@ void CWriter::printFunction(Function &F, bool inlineF) {
     errs() << *inst2var.first << " -> " << inst2var.second << "\n";
   }
 
+  static size_t Function_Order_ID = 0;
   /*
    * OpenMP: remove first two args from outline
    */
   if (!inlineF) {
-    if (F.getName() != "main")
+    if (F.getName() != "main") {
+      Out << "//__FIXME__FUNCTION_ORDER_ID__" << Function_Order_ID << '\n';
+      ++Function_Order_ID;
       Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
           << "\n";
+    }
     if (IS_OPENMP_FUNCTION)
       printFunctionProto(Out, FTy,
                          std::make_pair(F.getAttributes(), F.getCallingConv()),
@@ -8834,10 +8842,9 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
       Out << "  r.field1 = LLVMMul_sov(8 * sizeof(a), &a, &b, &r.field0);\n";
       break;
 
-
     case Intrinsic::nvvm_mul24_i:
       // cwriter_assert(cast<StructType>(retT)->getElementType(0) == elemT);
-      Out << "r = a * b; \n"; 
+      Out << "r = a * b; \n";
       break;
 
     case Intrinsic::bswap:
@@ -9504,6 +9511,13 @@ void CWriter::inlineNameForArg(Value *argInput, Value *arg) {
 }
 
 void CWriter::visitCallInst(CallInst &I) {
+
+  if (Function *F = I.getCalledFunction()) {
+    auto ID = F->getIntrinsicID();
+    if (ID != Intrinsic::not_intrinsic)
+      Out << "/*__FIXME__INTRINSIC_CALL__*/";
+  }
+
   CurInstr = &I;
 
   // skip barrier
