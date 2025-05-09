@@ -1069,9 +1069,7 @@ Value *CWriter::findOriginalUb(Function &F, Value *ub, CallInst *initCI,
 }
 
 void CWriter::omp_preprossesing(Function &F) {
-
   // FIXME: currently only searching for the loop to be processed
-
   // find __kmpc_for_static_init and associated loop info
   Value *lb, *ub, *incr;
   int schedtype, chunksize;
@@ -1894,6 +1892,8 @@ bool CWriter::runOnModule(Module &M) {
     if (F->hasAvailableExternallyLinkage())
       continue;
 
+    errs() << "ANDREW: CBackend: runOnModule function: " << F->getName()
+           << "\n";
     Modified |= RunAllAnalysis(*F);
 
     // Output all floating point constants that cannot be printed accurately.
@@ -4809,6 +4809,14 @@ void CWriter::generateHeader(Module &M) {
       case Intrinsic::trunc:
         intrinsicsToDefine.push_back(&*I);
         continue;
+
+      // ANDREW: ptx specific
+      case Intrinsic::nvvm_mul24_i:
+        errs() << "ANDREW: Intrinsic: ptx mul24 hit\n";
+        intrinsicsToDefine.push_back(&*I);
+        continue;
+
+
       }
     }
 
@@ -6817,7 +6825,6 @@ void CWriter::printFunction(Function &F, bool inlineF) {
     if (F.getName() != "main")
       Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
           << "\n";
-
     if (IS_OPENMP_FUNCTION)
       printFunctionProto(Out, FTy,
                          std::make_pair(F.getAttributes(), F.getCallingConv()),
@@ -8708,6 +8715,7 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
   case Intrinsic::sadd_with_overflow:
   case Intrinsic::ssub_with_overflow:
   case Intrinsic::smul_with_overflow:
+  case Intrinsic::nvvm_mul24_i:
     isSigned = true;
     break;
   }
@@ -8824,6 +8832,12 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
     case Intrinsic::smul_with_overflow:
       cwriter_assert(cast<StructType>(retT)->getElementType(0) == elemT);
       Out << "  r.field1 = LLVMMul_sov(8 * sizeof(a), &a, &b, &r.field0);\n";
+      break;
+
+
+    case Intrinsic::nvvm_mul24_i:
+      // cwriter_assert(cast<StructType>(retT)->getElementType(0) == elemT);
+      Out << "r = a * b; \n"; 
       break;
 
     case Intrinsic::bswap:
@@ -8998,6 +9012,7 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::stackprotector:
           case Intrinsic::dbg_value:
           case Intrinsic::dbg_declare:
+          case Intrinsic::nvvm_mul24_i:
             // We directly implement these intrinsics
             break;
 
@@ -10041,6 +10056,7 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID) {
   case Intrinsic::sqrt:
   case Intrinsic::trap:
   case Intrinsic::trunc:
+  case Intrinsic::nvvm_mul24_i:
     return false; // these use the normal function call emission
   }
 }

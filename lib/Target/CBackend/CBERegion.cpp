@@ -78,6 +78,8 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     : CBERegion2{LI, PDT, DT, parentR, entryBB, cwriter} {
   /*fetch branch related infos*/
   this->brBB = entryBB;
+
+  errs() << "ANDREW: entryBB name:" << entryBB->getName() << '\n';
   this->brInst = dyn_cast<BranchInst>(entryBB->getTerminator());
   assert(this->brInst && "terminator is not branch inst 600!\n");
   BranchInst *br = dyn_cast<BranchInst>(entryBB->getTerminator());
@@ -344,6 +346,7 @@ void LoopRegion::printRegionDAG() {
         }
       }
     }
+
     if (!printReduction) {
       // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
       cw->Out << "#pragma omp parallel for \n";
@@ -457,6 +460,7 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
   bool negateCondition = false;
   Instruction *condInst = cw->findCondInst(loop, negateCondition);
   this->ub = condInst->getOperand(1);
+
   this->nestlevel = LI->getLoopDepth(entryBB);
 
   assert(loop && "cannot find loop for a loop region\n");
