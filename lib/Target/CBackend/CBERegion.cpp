@@ -80,6 +80,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR, PostDominat
     //for(auto &BB : *(brBB->getParent())) {
     //  // YEBIN: skip itself!!
     //  if(&BB == brBB) continue;
+    //  errs() << "Checking " << BB.getName() << "...\n";
     //  if(PDT->dominates(&BB, brBB)){
     //    this->pdBB = &BB;
     //    break;

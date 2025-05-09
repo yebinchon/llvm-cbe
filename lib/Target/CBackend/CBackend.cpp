@@ -541,8 +541,9 @@ int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI){
   }
 
   if(BranchInst *br = dyn_cast<BranchInst>(entryBB->getTerminator()))
-    if(br->isConditional())
+    if(br->isConditional()) {
       return 1;
+    }
 
   return 0;
 }
@@ -9108,7 +9109,7 @@ void CWriter::runAnalysisOnKernelCaller(Function& F) {
             //only need device vars for those passed by reference
             //TODO: assumes no casting
             if(Times2Dereference[op]) {
-              DevVarDecls["dev_"+GetValueName(op)] = op;
+              DevVarDecls["__FIXME__dev_"+GetValueName(op)] = op;
               CallArgsMap[CallI][&arg] = op;
             }
           }
@@ -9313,7 +9314,8 @@ void CWriter::visitCallInst(CallInst &I) {
       auto* ty = devVar.second->getType();
       if(auto ptrTy = dyn_cast<PointerType>(ty))
         ty = ptrTy->getPointerElementType();
-      Out << "cudaMalloc(&" << devVar.first << ", " << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
+      Out << "cudaMalloc(&" << devVar.first << ", " << "__FIXME__size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
+      //Out << "cudaMalloc(&" << devVar.first << ", " <<  << "*sizeof(" << *ty << "));\n";
     }
     Out << "\n";
     for(auto devVar: DevVarDecls) {
@@ -9321,7 +9323,7 @@ void CWriter::visitCallInst(CallInst &I) {
       if(auto ptrTy = dyn_cast<PointerType>(ty))
         ty = ptrTy->getPointerElementType();
       Out << "cudaMemcpy(" << devVar.first << ", " << GetValueName(devVar.second) << ", " 
-      << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyHostToDevice);\n";
+      << "__FIXME__size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyHostToDevice);\n";
     }
     Out << "\n";
   }
@@ -9567,6 +9569,16 @@ void CWriter::visitCallInst(CallInst &I) {
                   false, std::make_pair(PAL, I.getCallingConv()));
     Out << "*)(void*)";
   }
+
+  // CUDA is C++ based, so malloc needs an explicit cast
+  auto MallocCallee = dyn_cast<Function>(Callee);
+  bool MallocCast = MallocCallee && (GetValueName(MallocCallee) == "malloc");
+  if(MallocCast) {
+    Out << "(";
+    printTypeName(Out, I.getType());
+    Out << ")";  
+  }
+
   // This is where Callee name is printed
   writeOperand(Callee, ContextCasted);
   if (NeedsCast)
@@ -9609,6 +9621,8 @@ void CWriter::visitCallInst(CallInst &I) {
       Out << "*(jmp_buf*)";
   }
 
+  bool isfprintf = (GetValueName(Callee) == "fprintf") ? true : false;
+
   for (; AI != AE; ++AI, ++ArgNo) {
     if (PrintedArg)
       Out << ", ";
@@ -9621,10 +9635,16 @@ void CWriter::visitCallInst(CallInst &I) {
       Out << ')';
     }
     // Check if the argument is expected to be passed by value.
-    if (I.getAttributes().hasAttribute(ArgNo + 1, Attribute::ByVal))
+    if (I.getAttributes().hasAttribute(ArgNo + 1, Attribute::ByVal)) {
       writeOperandDeref(*AI);
-    else
+    }
+    else {
+      // C++ fprintf changes...
+      if(isfprintf && (ArgNo == 1)) {
+        Out << "(char*)";
+      }
       writeOperand(*AI, ContextCasted);
+    }
     PrintedArg = true;
   }
   if(isEmptyType(I.getType()))
@@ -9641,7 +9661,7 @@ void CWriter::visitCallInst(CallInst &I) {
         if(auto ptrTy = dyn_cast<PointerType>(ty))
           ty = ptrTy->getPointerElementType();
         Out << "cudaMemcpy(" << GetValueName(devVar.second) << ", " << devVar.first << ", " 
-      << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyDeviceToHost);\n";
+      << "__FIXME__size_" << GetValueName(devVar.second) << "*sizeof(" << *ty << "), " << "cudaMemcpyDeviceToHost);\n";
       }
     }
   }
