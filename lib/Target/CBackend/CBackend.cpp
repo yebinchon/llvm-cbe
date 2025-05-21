@@ -36,6 +36,8 @@
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 
+// YEBIN: added libs
+#include "llvm/Demangle/Demangle.h"
 // Jackson Korba 9/29/14
 #ifndef DEBUG_TYPE
 #define DEBUG_TYPE ""
@@ -2449,6 +2451,9 @@ CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
                             iterator_range<Function::arg_iterator> *ArgList, int skipArgSteps) {
   bool shouldFixMain = (Name == "main" && isStandardMain(FTy));
 
+  // TODO: make sure uses of Name are properly swapped
+  std::string demangledName = demangleFunctionName(Name);
+
   AttributeList &PAL = Attrs.first;
 
   if (PAL.hasAttribute(AttributeList::FunctionIndex, Attribute::NoReturn)) {
@@ -2498,7 +2503,8 @@ CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
     errorWithMessage("Encountered Unhandled Calling Convention");
     break;
   }
-  Out << ' ' << Name << '(';
+  //Out << ' ' << Name << '(';
+  Out << ' ' << demangledName << '(';
 
   unsigned Idx = 1;
   bool PrintedArg = false;
@@ -3358,6 +3364,12 @@ void CWriter::printConstantWithCast(Constant *CPV, unsigned Opcode) {
     printConstant(CPV, ContextCasted);
 }
 
+std::string demangleFunctionName(std::string str) {
+  std::string FuncName = demangle(str);
+
+  return FuncName.substr(0, FuncName.find("("));
+}
+
 std::string demangleVariableName(std::string var){
   SmallVector<std::string, 16> splitedStrs;
 
@@ -3626,6 +3638,8 @@ void CWriter::writeOperandInternal(Value *Operand,
   if (CPV && !isa<GlobalValue>(CPV)){
     printConstant(CPV, Context);
   }
+  else if(isa<Function>(Operand))
+    Out << demangleFunctionName(GetValueName(Operand));
   else
     Out << GetValueName(Operand);
 }

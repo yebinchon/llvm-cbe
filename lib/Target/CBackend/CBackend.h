@@ -115,6 +115,7 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   PHINode* getInductionVariable(Loop *L);
   Instruction *getIVIncrement(Loop *L, PHINode* IV);
   void printCmpOperator(ICmpInst *icmp, bool negateCondition = false);
+  std::string demangleFunctionName(std::string str);
   std::string GetValueName(Value *Operand, bool isDeclaration=false);
   bool isSkipableInst(Instruction* inst);
   raw_ostream &printTypeString(raw_ostream &Out, Type *Ty, bool isSigned);
