@@ -6828,7 +6828,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
    */
   if (!inlineF) {
     if (F.getName() != "main") {
-      Out << "//__FIXME__FUNCTION_ORDER_ID__" << Function_Order_ID << '\n';
+      Out << "//FUNCTION ORDER ID: " << Function_Order_ID << '\n';
       ++Function_Order_ID;
       Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
           << "\n";
