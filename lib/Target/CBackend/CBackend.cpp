@@ -6828,8 +6828,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
    */
   if (!inlineF) {
     if (F.getName() != "main") {
-      Out << "//FUNCTION ORDER ID: " << Function_Order_ID << '\n';
-      ++Function_Order_ID;
+      Out << "//FUNCTION ORDER ID " << Function_Order_ID << " START\n";
       Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
           << "\n";
     }
@@ -6982,8 +6981,14 @@ void CWriter::printFunction(Function &F, bool inlineF) {
   //    }
   //
 
-  if (!inlineF)
-    Out << "}\n\n";
+  if (!inlineF) {
+    Out << "}\n";
+    if (F.getName() != "main") {
+      Out << "// FUNCTION ORDER ID " << Function_Order_ID << " END\n\n";
+      ++Function_Order_ID;
+    } else 
+    Out << "\n";
+  }
 }
 
 void CWriter::printCmpOperator(ICmpInst *icmp, bool negateCondition) {
