@@ -331,7 +331,7 @@ void LoopRegion::printRegionDAG() {
     }
     if (!printCollapse) {
       // cw->Out << "//INSERT COMMENT: " << header->getName() << "\n";
-      cw->Out << "#pragma omp parallel for";
+      cw->Out << "#pragma omp parallel for\n";
     }
   } else if (headerBr->getMetadata("noelle.doall.loop")) {
     bool printReduction = false;
@@ -425,7 +425,7 @@ void CBERegion2::printRegionDAG() {
     R->printRegionDAG();
   }
 }
-
+;
 void IfElseRegion::removeIfElseBlockFromLR(LoopRegion *lr, BasicBlock *brBB) {
   for (auto &BB : *(brBB->getParent())) {
     if (DT->dominates(brBB, &BB) && PDT->dominates(pdBB, &BB) && pdBB != &BB) {
