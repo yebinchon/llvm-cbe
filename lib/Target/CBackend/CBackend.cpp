@@ -1901,6 +1901,7 @@ bool CWriter::runOnModule(Module &M) {
     // Output all floating point constants that cannot be printed accurately.
     printFloatingPointConstants(*F);
     printFunction(*F);
+    Out << "// YEBIN: " << nameDict.LocalVars[demangleFunctionName(F->getName())].size() << "\n";
 
     LI = nullptr;
     PDT = nullptr;
@@ -2300,6 +2301,7 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
                                              StructType *STy) {
   if (STy->isPacked())
     Out << "#ifdef _MSC_VER\n#pragma pack(push, 1)\n#endif\n";
+  std::vector<std::string> fieldNames;
   Out << getStructName(STy) << " {\n";
   unsigned Idx = 0;
   for (StructType::element_iterator I = STy->element_begin(),
@@ -2312,6 +2314,7 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
     // printTypeName(Out, *I, false) << " field" << utostr(Idx);
     //  append struct name to field for FIXME
     printTypeName(Out, *I, false) << " " + getFieldName(STy) << utostr(Idx);
+    fieldNames.push_back(getFieldName(STy)+utostr(Idx));
     ArrayType *ArrTy = dyn_cast<ArrayType>(*I);
     while (ArrTy) {
       Out << "[" << ArrTy->getNumElements() << "]";
@@ -2323,6 +2326,8 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
       Out << ";\n";
   }
   Out << '}';
+  
+  nameDict.StructDefs.insert({getStructName(STy).substr(7), fieldNames});
   if (STy->isPacked())
     Out << " __attribute__ ((packed))";
   Out << ";\n";
@@ -2507,6 +2512,53 @@ raw_ostream &CWriter::printFunctionDeclaration(
   return Out << ";\n";
 }
 
+void CWriter::printDict() {
+  nameDictOut.open("dictionary.json");
+
+  nameDictOut << "{\n";
+  nameDictOut << "\"globals\": [\n";
+  bool isfirst = true;
+  for (auto glob: nameDict.GlobalVars) {
+    if(!isfirst) nameDictOut << ", \n";
+    isfirst = false;
+    nameDictOut << "\t\"" << glob << "\"";
+  }
+  nameDictOut << "\n],\n\"struct_definitions\": {\n";
+  isfirst = true;
+  for (auto struc: nameDict.StructDefs) {
+    if(!isfirst) nameDictOut << ",\n";
+    isfirst = false;
+    nameDictOut << "\"struct_name\": \"" << struc.first << "\", \n";
+    nameDictOut << "\"fields\": [\n";
+    bool isfirstfield = true;
+    for(auto field: struc.second) {
+      if(!isfirstfield) nameDictOut << ", \n";
+      isfirstfield = false;
+      nameDictOut << "\t\"" << field << "\"";
+    }
+    nameDictOut << "\n]";
+  }
+  nameDictOut << "\n},\n\"functions\": {\n";
+  isfirst = true;
+  for(auto func: nameDict.LocalVars) {
+    if(!isfirst) nameDictOut << ", \n";
+    isfirst = false;
+    nameDictOut << "\"" << func.first << "\": [\n";
+    bool isfirstvar = true;
+    for(auto var: func.second) {
+      if(!isfirstvar) nameDictOut << ", \n";
+      isfirstvar = false;
+      nameDictOut << "\t\"" << var << "\"";
+    }
+    nameDictOut << "\n]";
+  }
+
+  nameDictOut << "\n}";
+  nameDictOut << "\n}";
+
+  nameDictOut.close();
+}
+
 // Commonly accepted types and names for main()'s return type and arguments.
 static const std::initializer_list<std::pair<StringRef, StringRef>> MainArgs = {
     // Standard C return type.
@@ -2662,10 +2714,13 @@ raw_ostream &CWriter::printFunctionProto(
     PrintedArg = true;
     if (ArgList) {
       Out << ' ';
+      std::string argName;
       if (shouldFixMain)
-        Out << MainArgs.begin()[Idx].second;
+        argName = MainArgs.begin()[Idx].second;
       else
-        Out << GetValueName(ArgName);
+        argName = GetValueName(ArgName);
+      Out << argName;
+      nameDict.LocalVars[demangledName].insert(argName);
       ++ArgName;
     }
     ++Idx;
@@ -4440,6 +4495,7 @@ bool CWriter::doFinalization(Module &M) {
   _Out.clear();
   generateHeader(M);
   std::string header = OutHeaders.str() + Out.str();
+  printDict();
   _Out.clear();
   _OutHeaders.clear();
   FileOut << header << methods;
@@ -5765,6 +5821,7 @@ void CWriter::declareOneGlobalVariable(GlobalVariable *I) {
 
   printTypeNameForAddressableValue(Out, ElTy, false);
   Out << ' ' << GetValueName(I);
+  nameDict.GlobalVars.insert(GetValueName(I));
   ArrayType *ArrTy = dyn_cast<ArrayType>(ElTy);
   while (ArrTy) {
     Out << "[" << ArrTy->getNumElements() << "]";
@@ -6507,6 +6564,7 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
 
     PrintedVar = true;
     isDeclared = true;
+    nameDict.LocalVars[demangleFunctionName(I->getFunction()->getName())].insert(varName);
   }
   // We need a temporary for the BitCast to use so it can pluck a value out
   // of a union to do the BitCast. This is separate from the need for a
@@ -6828,10 +6886,11 @@ void CWriter::printFunction(Function &F, bool inlineF) {
    */
   if (!inlineF) {
     if (F.getName() != "main") {
-      Out << "//FUNCTION ORDER ID " << Function_Order_ID << " START\n";
-      Out << "//INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
+      Out << "// FUNCTION ORDER ID " << Function_Order_ID << " START\n";
+      Out << "// INSERT COMMENT FUNCTION: " << demangleFunctionName(F.getName())
           << "\n";
-    }
+    } else 
+      Out << "// MAIN START\n";
     if (IS_OPENMP_FUNCTION)
       printFunctionProto(Out, FTy,
                          std::make_pair(F.getAttributes(), F.getCallingConv()),
@@ -6987,7 +7046,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
       Out << "// FUNCTION ORDER ID " << Function_Order_ID << " END\n\n";
       ++Function_Order_ID;
     } else 
-    Out << "\n";
+    Out << "// MAIN END\n\n";
   }
 }
 

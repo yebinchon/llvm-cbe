@@ -8,6 +8,8 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/Support/raw_ostream.h"
+#include <fstream>
 #include <unordered_set>
 #if LLVM_VERSION_MAJOR > 10
 #include "llvm/IR/AbstractCallSite.h"
@@ -85,6 +87,11 @@ typedef struct LoopProfile{
 
 std::string demangleFunctionName(std::string str);
 
+typedef struct NameDictionary{
+  std::set<std::string> GlobalVars;
+  std::set<std::pair<std::string, std::vector<std::string>>> StructDefs;
+  std::map<std::string, std::set<std::string>> LocalVars;
+} NameDictionary;
 
 /// CWriter - This class is the main chunk of code that converts an LLVM
 /// module to a C translation unit.
@@ -140,6 +147,9 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   std::set<LoadInst*> addressExposedLoads;
   std::set<Value*> valuesCast2Double;
 
+  // YEBIN: dictionary of var names
+  std::ofstream nameDictOut;
+  NameDictionary nameDict;
   // SUSAN: tables for variable preservation
   std::set<std::pair<Value*, std::string>> IRNaming;
   std::set<std::string>allVars, phiVars;
@@ -320,6 +330,7 @@ public:
   explicit CWriter(raw_ostream &o)
       : ModulePass(ID), OutHeaders(_OutHeaders), Out(_Out), FileOut(o) {
     memset(&UsedHeaders, 0, sizeof(UsedHeaders));
+    //nameDictOut.open("dictionary.json");
   }
 
   virtual StringRef getPassName() const { return "C backend"; }
@@ -359,6 +370,8 @@ private:
         std::make_pair(F->getAttributes(), F->getCallingConv()),
         GetValueName(F), nullptr, skipArgSteps);
   }
+
+  void printDict();
 
   raw_ostream &
   printFunctionDeclaration(raw_ostream &Out, FunctionType *Ty,

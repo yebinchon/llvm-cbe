@@ -251,9 +251,10 @@ void LinearRegion::printRegionDAG() {
   }
 }
 void IfElseRegion::printRegionDAG() {
-  if (!this->parentRegion || this->parentRegion->isaLinearRegion())
-    cw->Out << "//INSERT COMMENT IFELSE: " << this->entryBlock->getName()
-            << "\n";
+  if (!this->parentRegion || this->parentRegion->isaLinearRegion()) {
+    auto FuncName = demangleFunctionName(this->entryBlock->getParent()->getName());
+    cw->Out << "// INSERT COMMENT IFELSE: " << FuncName << "::" << this->entryBlock->getName() << "\n";
+  }
 
   errs() << "IfElse Region with entering block: "
          << getEntryBlock()->getParent()->getName()
@@ -275,14 +276,16 @@ void IfElseRegion::printRegionDAG() {
   // print If branch
   cw->Out << "  if (";
   cw->writeOperand(condInst, cw->ContextCasted);
-  cw->Out << ") {\n";
+  cw->Out << ") {";
+  cw->Out << " // IFELSE MARKER: " << entryBlock->getName() << " IF\n"; 
   for (auto R : thenSubRegions)
     R->printRegionDAG();
 
   // print else branch
   if (!elseSubRegions.empty()) {
     errs() << "elseSubRegions : \n";
-    cw->Out << "  } else {\n";
+    cw->Out << "  } else {";
+    cw->Out << " // IFELSE MARKER: " << entryBlock->getName() << " ELSE\n";
     for (auto R : elseSubRegions)
       R->printRegionDAG();
   }
@@ -291,8 +294,10 @@ void IfElseRegion::printRegionDAG() {
 }
 
 void LoopRegion::printRegionDAG() {
-  if (!this->parentRegion || this->parentRegion->isaLinearRegion())
-    cw->Out << "//INSERT COMMENT LOOP: " << this->entryBlock->getName() << "\n";
+  if (!this->parentRegion || this->parentRegion->isaLinearRegion()) {
+    auto FuncName = demangleFunctionName(this->entryBlock->getParent()->getName());
+    cw->Out << "// INSERT COMMENT LOOP: " << FuncName << "::" << this->entryBlock->getName() << "\n";
+  }
   errs() << "Loop Region with entering block: " << getEntryBlock()->getName()
          << "\n";
 
