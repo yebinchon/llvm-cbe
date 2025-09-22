@@ -1901,7 +1901,6 @@ bool CWriter::runOnModule(Module &M) {
     // Output all floating point constants that cannot be printed accurately.
     printFloatingPointConstants(*F);
     printFunction(*F);
-    Out << "// YEBIN: " << nameDict.LocalVars[demangleFunctionName(F->getName())].size() << "\n";
 
     LI = nullptr;
     PDT = nullptr;
@@ -7116,7 +7115,7 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
   if (deadInsts.find(I) != deadInsts.end())
     return;
   Out << "  ";
-  if (!isEmptyType(I->getType()) && !isInlineAsm(*I)) {
+  if (!(&*I)->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I)) {
     auto varName = GetValueName(&*I, true);
     if (canDeclareLocalLate(*I) && !isIVIncrement(I)) {
       errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
@@ -9866,6 +9865,7 @@ void CWriter::visitCallInst(CallInst &I) {
   }
   // This is where Callee name is printed
   writeOperand(Callee, ContextCasted);
+  if(Callee->getName() == "fprintf") errs() << "YEBIN: FPRINTF\n";
   if (NeedsCast)
     Out << ')';
 

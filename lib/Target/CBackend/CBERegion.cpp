@@ -250,6 +250,7 @@ void LinearRegion::printRegionDAG() {
     cw->printBasicBlock(BB);
   }
 }
+
 void IfElseRegion::printRegionDAG() {
   if (!this->parentRegion || this->parentRegion->isaLinearRegion()) {
     auto FuncName = demangleFunctionName(this->entryBlock->getParent()->getName());
