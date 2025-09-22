@@ -2748,6 +2748,8 @@ raw_ostream &CWriter::printArrayDeclaration(raw_ostream &Out, ArrayType *ATy) {
   Out << getArrayName(ATy) << " {\n  ";
   printTypeName(Out, ATy->getElementType());
   Out << " array[" << utostr(ATy->getNumElements()) << "];\n};\n";
+  // lump it with struct declarations
+  nameDict.StructDefs.insert({getArrayName(ATy).substr(7), {"array"}});
   return Out;
 }
 
