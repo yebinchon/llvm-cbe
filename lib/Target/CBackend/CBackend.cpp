@@ -2528,8 +2528,8 @@ void CWriter::printDict() {
   for (auto struc: nameDict.StructDefs) {
     if(!isfirst) nameDictOut << ",\n";
     isfirst = false;
-    nameDictOut << "\"struct_name\": \"" << struc.first << "\", \n";
-    nameDictOut << "\"fields\": [\n";
+    // Emit mapping form: "struct_definitions": { "<struct_name>": [ fields ] , ... }
+    nameDictOut << "\"" << struc.first << "\": [\n";
     bool isfirstfield = true;
     for(auto field: struc.second) {
       if(!isfirstfield) nameDictOut << ", \n";
@@ -7589,6 +7589,7 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
             declaredLocals.insert(varName);
           else
             omp_declaredLocals.insert(varName);
+          nameDict.LocalVars[demangleFunctionName(II->getFunction()->getName())].insert(varName);
         }
         Out << varName << " = ";
       }
