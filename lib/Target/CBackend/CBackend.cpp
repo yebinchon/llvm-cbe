@@ -6507,6 +6507,7 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
     Out << ";    /* Address-exposed local */\n";
     PrintedVar = true;
     isDeclared = true;
+    nameDict.LocalVars[demangleFunctionName(I->getFunction()->getName())].insert(varName);
   } else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
     errs() << "YEBIN: WE ARE HERE FOR " << *I << "\n";
 
