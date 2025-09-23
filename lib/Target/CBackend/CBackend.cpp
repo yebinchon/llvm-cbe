@@ -6531,7 +6531,7 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
     errs() << "SUSAN: declared locals:\n";
     for (auto local : declaredLocals)
       errs() << local << "\n";
-    if (!canDeclareLocalLate(*I) && isNotDuplicatedDeclaration(I, false)) {
+    if (!canDeclareLocalLate(*I) && isNotDuplicatedDeclaration(I, false) && !(&*I)->user_empty()) {
       if (declaredLocals.find(varName) != declaredLocals.end())
         return;
       auto varName = GetValueName(I, true);
@@ -6562,11 +6562,11 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
       Out << ";\n";
 
       // insertDeclaredInsts(I);
+      nameDict.LocalVars[demangleFunctionName(I->getFunction()->getName())].insert(varName);
     }
 
     PrintedVar = true;
     isDeclared = true;
-    nameDict.LocalVars[demangleFunctionName(I->getFunction()->getName())].insert(varName);
   }
   // We need a temporary for the BitCast to use so it can pluck a value out
   // of a union to do the BitCast. This is separate from the need for a
