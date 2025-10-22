@@ -2299,6 +2299,9 @@ raw_ostream &CWriter::printTypeNameUnaligned(raw_ostream &Out, Type *Ty,
 
 raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
                                              StructType *STy) {
+  // The IO struct is in stdio.h, should not be exposed
+  if (getStructName(STy) == "struct __FIXME__l_struct_struct_OC__IO_FILE")
+    return Out;
   if (STy->isPacked())
     Out << "#ifdef _MSC_VER\n#pragma pack(push, 1)\n#endif\n";
   std::vector<std::string> fieldNames;
@@ -6335,6 +6338,9 @@ void CWriter::forwardDeclareStructs(raw_ostream &Out, Type *Ty,
   }
 
   if (StructType *ST = dyn_cast<StructType>(Ty)) {
+    // The IO struct is in stdio.h, should not be exposed
+    if (getStructName(ST) == "struct __FIXME__l_struct_struct_OC__IO_FILE")
+      return;
     Out << getStructName(ST) << ";\n";
   } else if (auto *FT = dyn_cast<FunctionType>(Ty)) {
     // Ensure function types which are only directly used by struct types will
