@@ -21,6 +21,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -3160,6 +3161,9 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
       Out << ')';
       return;
     }
+    case Instruction::AddrSpaceCast: {
+      return;
+    }
     default:
       DBG_ERRS("CWriter Error: Unhandled constant expression: " << *CE);
       errorWithMessage("unhandled constant expression");
@@ -4840,6 +4844,9 @@ void CWriter::generateHeader(Module &M) {
     if ((&*I)->getName().contains("fclose"))
       continue;
     if ((&*I)->getName().contains("memcpy"))
+      continue;
+    // Do not print any cuda functions, they should not be in the code
+    if((&*I)->getName().contains("cuda"))
       continue;
     // if((&*I)->getName().contains("xmalloc")) continue;
     //  Don't print declarations for intrinsic functions.
@@ -6683,8 +6690,10 @@ void CWriter::printFunction(Function &F, bool inlineF) {
               // try: build just IRNaming
               IRNaming.insert(std::make_pair(valInst, varName));
             }
-          } else
+          } else {
+            errs() << "In function " << I->getFunction()->getName() << "\n";
             assert(0 && "SUSAN: 1st argument is not a Value?\n");
+          }
         }
       }
     }
@@ -9088,6 +9097,7 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::dbg_value:
           case Intrinsic::dbg_declare:
           case Intrinsic::nvvm_mul24_i:
+          case Intrinsic::nvvm_barrier0:
             // We directly implement these intrinsics
             break;
 
@@ -9957,6 +9967,9 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID) {
     errorWithMessage("unknown llvm instrinsic");
     return false;
   }
+  case Intrinsic::nvvm_barrier0:
+    Out << "//sync point\n";
+    return true;
   case Intrinsic::dbg_value:
   case Intrinsic::dbg_declare:
     return true; // ignore these intrinsics
