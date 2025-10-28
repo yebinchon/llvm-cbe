@@ -559,6 +559,9 @@ int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI) {
 
     if (L->getHeader() == entryBB)
       return 2;
+    //// make sure this doesn't introduce an error into for loops
+    //else if(L->getLoopLatch() == entryBB)
+    //  return 0;
     errs() << "but not a header!\n";
   }
 
@@ -884,7 +887,7 @@ Instruction *CWriter::getIVIncrement(Loop *L, PHINode *IV) {
 }
 
 PHINode *CWriter::getInductionVariable(Loop *L) {
-  // errs() << "trying to get IV for Loop:" << *L << "\n";
+  //errs() << "trying to get IV for Loop:" << *L << "\n";
   PHINode *InnerIndexVar = L->getCanonicalInductionVariable();
   if (InnerIndexVar) {
     errs() << "SUSAN: found IV 784" << *InnerIndexVar << "\n";
@@ -1216,6 +1219,7 @@ Value *CWriter::findOriginalValue(Value *val) {
 }
 
 void CWriter::preprocessLoopProfiles(Function &F) {
+  errs() << "In preprocessLoopProfiles(" << F.getName() << ")\n";
   std::list<Loop *> loops(LI->begin(), LI->end());
 
   while (!loops.empty()) {
@@ -1236,9 +1240,18 @@ void CWriter::preprocessLoopProfiles(Function &F) {
       continue;
     }
 
-    errs() << "CBackend: here? 1175\n";
+    errs() << "Not skipping " << L->getName() << "\n";
     PHINode *IV = getInductionVariable(L);
-    if (!IV) {
+    // handle case where loop is while but has an indvar
+    bool exitFromLatch = (L->getExitBlock()->getSinglePredecessor() == L->getLoopLatch());
+    BranchInst* lBr = dyn_cast<BranchInst>(L->getHeader()->getTerminator());
+    bool cmpWithIV = false;
+    if(lBr && lBr->isConditional())
+      if(CmpInst* lCmp = dyn_cast<CmpInst>(lBr->getCondition()))
+        if(lCmp->getOperand(0) == IV || lCmp->getOperand(1) == IV)
+            cmpWithIV = true;
+    bool isaForLoop = exitFromLatch && cmpWithIV;
+    if (!isaForLoop) {
       errs() << "SUSAN: recording while loop profile:" << *L << "\n";
       LoopProfile *LP = new LoopProfile();
       LP->isForLoop = false;
@@ -1259,6 +1272,7 @@ void CWriter::preprocessLoopProfiles(Function &F) {
                    L->getSubLoops().end());
       continue;
     }
+    errs() << "YEBIN: We are here\n";
 
     LoopProfile *LP = new LoopProfile();
     LP->isForLoop = true;
@@ -1340,6 +1354,8 @@ void CWriter::preprocessSkippableBranches(Function &F) {
     if (!cmp)
       continue;
 
+    errs() << "Preprocessing branch \n\t" << *br << "\nwith comparitor\n\t" << *cmp << "\nin " << F.getName() << "\n"; 
+
     Value *opnd0 = cmp->getOperand(0);
     Value *opnd1 = cmp->getOperand(1);
     errs() << "SUSAN: opnd0" << *opnd0 << "\n";
@@ -1363,7 +1379,9 @@ void CWriter::preprocessSkippableBranches(Function &F) {
     }
 
     for (auto LP : LoopProfiles) {
+      errs() << "Checking LP " << LP->L->getName() << "\n";
       if (LP->isForLoop) {
+        errs() << "It's a for loop!\n";
         Value *UpperBound = findOriginalValue(LP->ub);
         errs() << "SUSAN: LP->ub: " << *LP->ub << "\n";
         // if(LoadInst *ldUB = dyn_cast<LoadInst>(LP->ub))
@@ -1396,8 +1414,11 @@ void CWriter::preprocessSkippableBranches(Function &F) {
         //   }
         //}
       } else {
+        errs() << "Not a for loop\n";
         bool negateCondition;
         Instruction *condInst = findCondInst(LP->L, negateCondition);
+        errs() << *condInst << "\n";
+        if(!isa<CmpInst>(condInst)) continue;
         Value *loopCondOpnd0 = condInst->getOperand(0);
         Value *loopCondOpnd1 = condInst->getOperand(1);
         if (loopCondOpnd1 != opnd1 && loopCondOpnd0 != opnd0)
@@ -1766,6 +1787,7 @@ void CWriter::buildIVNames() {
   // }
 
   for (auto LP : LoopProfiles) {
+    if(!LP->isForLoop) continue;
     errs() << "LP->LV 1694: " << *(LP->IV) << "\n";
     errs() << "LP->L 1694: " << *(LP->L) << "\n";
     char nestLevel = LP->L->getLoopDepth() - 1;
@@ -2003,8 +2025,11 @@ raw_ostream &CWriter::printTypeString(raw_ostream &Out, Type *Ty,
 // YEBIN: append FIXME to all structs
 std::string CWriter::getStructName(StructType *ST) {
   cwriter_assert(ST->getNumElements() != 0);
-  if (!ST->isLiteral() && !ST->getName().empty())
+  if (!ST->isLiteral() && !ST->getName().empty()) {
+    // special case for FILE type
+    if(CBEMangle(ST->getName().str()) == "struct_OC__IO_FILE") return "FILE";
     return "struct __FIXME__l_struct_" + CBEMangle(ST->getName().str());
+  }
 
   unsigned id = UnnamedStructIDs.getOrInsert(ST);
   return "struct __FIXME__l_unnamed_" + utostr(id);
@@ -2300,7 +2325,7 @@ raw_ostream &CWriter::printTypeNameUnaligned(raw_ostream &Out, Type *Ty,
 raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
                                              StructType *STy) {
   // The IO struct is in stdio.h, should not be exposed
-  if (getStructName(STy) == "struct __FIXME__l_struct_struct_OC__IO_FILE")
+  if (getStructName(STy) == "FILE")
     return Out;
   if (STy->isPacked())
     Out << "#ifdef _MSC_VER\n#pragma pack(push, 1)\n#endif\n";
@@ -4817,6 +4842,8 @@ void CWriter::generateHeader(Module &M) {
       continue;
     if ((&*I)->getName().contains("fprintf"))
       continue;
+    if ((&*I)->getName().contains("fscanf"))
+      continue;
     if ((&*I)->getName().contains("atoll"))
       continue;
     if ((&*I)->getName().contains("calloc"))
@@ -6339,7 +6366,7 @@ void CWriter::forwardDeclareStructs(raw_ostream &Out, Type *Ty,
 
   if (StructType *ST = dyn_cast<StructType>(Ty)) {
     // The IO struct is in stdio.h, should not be exposed
-    if (getStructName(ST) == "struct __FIXME__l_struct_struct_OC__IO_FILE")
+    if (getStructName(ST) == "FILE")
       return;
     Out << getStructName(ST) << ";\n";
   } else if (auto *FT = dyn_cast<FunctionType>(Ty)) {
@@ -7192,6 +7219,12 @@ Instruction *CWriter::findCondInst(Loop *L, bool &negateCondition) {
   auto header = L->getHeader();
   Instruction *term = header->getTerminator();
   BranchInst *brInst = dyn_cast<BranchInst>(term);
+  if(!brInst->isConditional()) {
+    auto latch = L->getLoopLatch();
+    errs() << *latch << "\n";
+    brInst = dyn_cast<BranchInst>(latch->getTerminator());
+    if(!brInst->isConditional()) return nullptr;
+  }
   Value *cond = brInst->getCondition();
   if (isa<CmpInst>(cond) || isa<UnaryInstruction>(cond) ||
       isa<BinaryOperator>(cond) || isa<CallInst>(cond)) {
