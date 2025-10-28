@@ -4878,6 +4878,8 @@ void CWriter::generateHeader(Module &M) {
       case Intrinsic::rint:
       case Intrinsic::sqrt:
       case Intrinsic::trunc:
+      case Intrinsic::nvvm_lg2_approx_f:
+      case Intrinsic::nvvm_ex2_approx_f:
         intrinsicsToDefine.push_back(&*I);
         continue;
 
@@ -9035,6 +9037,16 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
       headerUseMath();
       Out << "  r = trunc" << suffix << "(a);\n";
       break;
+
+    case Intrinsic::nvvm_lg2_approx_f:
+      headerUseMath();
+      Out << "  r = log2" << suffix << "(a);\n";
+      break;
+
+    case Intrinsic::nvvm_ex2_approx_f:
+      headerUseMath();
+      Out << "  r = exp2" << suffix << "(a);\n";
+      break;
     }
   }
 
@@ -9098,6 +9110,8 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::rint:
           case Intrinsic::sqrt:
           case Intrinsic::trunc:
+          case Intrinsic::nvvm_lg2_approx_f:
+          case Intrinsic::nvvm_ex2_approx_f:
           case Intrinsic::trap:
           case Intrinsic::stackprotector:
           case Intrinsic::dbg_value:
@@ -10158,6 +10172,8 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID) {
   case Intrinsic::sqrt:
   case Intrinsic::trap:
   case Intrinsic::trunc:
+  case Intrinsic::nvvm_lg2_approx_f:
+  case Intrinsic::nvvm_ex2_approx_f:
   case Intrinsic::nvvm_mul24_i:
     return false; // these use the normal function call emission
   }
