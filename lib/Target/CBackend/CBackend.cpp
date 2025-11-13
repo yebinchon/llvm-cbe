@@ -554,20 +554,23 @@ void CWriter::markBranchRegion(Instruction *br, CBERegion *targetRegion) {
 }
 
 int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI) {
-  if (Loop *L = LI->getLoopFor(entryBB)) {
+  Loop *L = LI->getLoopFor(entryBB);
+  if (L) {
     errs() << "CBackend: entryBB is a loop: " << entryBB->getName() << "\n";
 
     if (L->getHeader() == entryBB)
       return 2;
-    //// make sure this doesn't introduce an error into for loops
-    //else if(L->getLoopLatch() == entryBB)
-    //  return 0;
     errs() << "but not a header!\n";
   }
 
+  errs() << *entryBB->getTerminator() << "\n";
   if (BranchInst *br = dyn_cast<BranchInst>(entryBB->getTerminator()))
-    if (br->isConditional())
+    if (br->isConditional()) {
+      // special case: do-while loop latch, not if-else
+      if(L && L->getLoopLatch() == entryBB)
+        return 0;
       return 1;
+    }
 
   return 0;
 }
@@ -1218,6 +1221,80 @@ Value *CWriter::findOriginalValue(Value *val) {
   return newVal;
 }
 
+bool CWriter::isReturnOrExit(BasicBlock *BB) {
+  Instruction *term = BB->getTerminator();
+  if (isa<UnreachableInst>(term))
+    return true;
+  if (isa<ReturnInst>(term))
+    return true;
+  // branch to a return-only block
+  if(auto* branch = dyn_cast<BranchInst>(term)) {
+    if(branch->isUnconditional()) {
+      BasicBlock* succ = branch->getSuccessor(0);
+      // Check if it is a return-only block
+      if(isa<ReturnInst>(succ->getFirstNonPHIOrDbgOrLifetime()))
+        return true;
+    }
+  }
+  return false;
+}
+
+LoopType CWriter::getLoopType(Loop* loop) {
+  // TODO: assume single exit block for now...
+  errs() << "Getting loop type...\n";
+  BasicBlock* exitBB = getSingleExitBlock(loop);
+  BasicBlock* latchBB = loop->getLoopLatch();
+  BasicBlock* exitPredBB = exitBB->getUniquePredecessor();
+  BasicBlock* entryBlock = loop->getHeader();
+  assert(exitPredBB && "No unique predecessor of loop exit!!\n");
+  if(exitPredBB == latchBB)
+    return doWhileLoop;
+
+  BranchInst* brInst = dyn_cast<BranchInst>(entryBlock->getTerminator());
+  assert(brInst->isConditional() && "This is not the loop branch!!\n");
+
+  errs() << *brInst->getCondition() << "\n";
+  CmpInst* cmp = dyn_cast<CmpInst>(brInst->getCondition());
+  if(!cmp) return whileLoop;
+
+  if(auto IV = getInductionVariable(loop)) {
+    errs() << "Found IV!\n\t"<< *IV << "\n";
+    if(cmp->getOperand(0) != IV && cmp->getOperand(1) != IV)
+      return whileLoop;
+    return forLoop;
+  }
+
+  return whileLoop;
+}
+
+BasicBlock* CWriter::getSingleExitBlock(Loop *L) {
+  if(auto* singleExitBB = L->getExitBlock())
+    return singleExitBB;
+
+  SmallVector<BasicBlock*, 2> exitBBs;
+  L->getExitBlocks(exitBBs);
+
+  BasicBlock* exitBlock = nullptr;
+  unsigned numExitBBs = 0;
+  for(auto* exitBB: exitBBs) {
+    errs() << *exitBB << "\n";
+    if(BasicBlock* exitPredBB = exitBB->getUniquePredecessor()) {
+        if(exitPredBB == L->getLoopLatch() || exitPredBB == L->getHeader()) {
+          exitBlock = exitBB;
+          numExitBBs++;
+        }
+      }
+    else
+     errs() << "Multiple preds\n";
+    //if(isReturnOrExit(exitBB)) continue;
+    //numExitBBs++;
+    //exitBlock = exitBB;
+  }
+  assert(exitBlock && "No valid exit found for the loop!!\n");
+  assert(numExitBBs == 1 && "Multiple valid exits that are not return/unreachables!!\n");
+  return exitBlock;
+}
+
 void CWriter::preprocessLoopProfiles(Function &F) {
   errs() << "In preprocessLoopProfiles(" << F.getName() << ")\n";
   std::list<Loop *> loops(LI->begin(), LI->end());
@@ -1242,8 +1319,11 @@ void CWriter::preprocessLoopProfiles(Function &F) {
 
     errs() << "Not skipping " << L->getName() << "\n";
     PHINode *IV = getInductionVariable(L);
+    BasicBlock* exitBlock = getSingleExitBlock(L);
     // handle case where loop is while but has an indvar
-    bool exitFromLatch = (L->getExitBlock()->getSinglePredecessor() == L->getLoopLatch());
+    errs() << "Header and latch\n";
+    errs() << *L->getHeader() << *L->getLoopLatch() << "\n";
+    bool exitFromLatch = (exitBlock->getSinglePredecessor() == L->getLoopLatch());
     BranchInst* lBr = dyn_cast<BranchInst>(L->getHeader()->getTerminator());
     bool cmpWithIV = false;
     if(lBr && lBr->isConditional())
@@ -1509,7 +1589,7 @@ void CWriter::EliminateDeadInsts(Function &F) {
           for (User *U : inst->users())
             if (isa<StoreInst>(U)) {
               errs() << "SUSAN: found storeinst 1404: " << *U << "\n";
-              deadInsts.insert(cast<Instruction>(U));
+              //deadInsts.insert(cast<Instruction>(U));
             }
         } else if (F->getName() == "strtol") {
           for (User *U : inst->users())
@@ -3660,7 +3740,8 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
 
   // YEBIN : add FIXME prefix to vars with no metadata
   std::string Name{Operand->getName()};
-  if (Name.empty()) { // Assign unique names to local temporaries.
+  bool noMetadataName = Name.empty();
+  if (noMetadataName) { // Assign unique names to local temporaries.
     unsigned No = AnonValueNumbers.getOrInsert(Operand);
 
     Name = utostr(No);
@@ -3676,7 +3757,9 @@ std::string CWriter::GetValueName(Value *Operand, bool isDeclaration) {
 
   // Mangle globals and also append a FIXME to vars
   if (isa<GlobalVariable>(Operand)) {
-    return "__FIXME_GLOBAL__" + CBEMangle(Name);
+    if(noMetadataName)
+      return "__FIXME_GLOBAL__" + CBEMangle(Name);
+    return CBEMangle(Name);
   }
 
   // Mangle globals with the standard mangler interface for LLC compatibility.
@@ -4645,8 +4728,10 @@ void CWriter::findOMPFunctions(Module &M) {
         if (auto alloca = isDirectAlloca(argInput))
           for (auto user : alloca->users())
             if (StoreInst *store = dyn_cast<StoreInst>(user))
-              if (store->getPointerOperand() == alloca)
+              if (store->getPointerOperand() == alloca) {
+                errs() << "YEBIN: FOUND DEAD STORE " << *store << "\n";
                 deadInsts.insert(store);
+              }
       }
     }
   }
@@ -4905,8 +4990,6 @@ void CWriter::generateHeader(Module &M) {
       case Intrinsic::rint:
       case Intrinsic::sqrt:
       case Intrinsic::trunc:
-      case Intrinsic::nvvm_lg2_approx_f:
-      case Intrinsic::nvvm_ex2_approx_f:
         intrinsicsToDefine.push_back(&*I);
         continue;
 
@@ -6670,6 +6753,8 @@ void CWriter::printFunction(Function &F, bool inlineF) {
       if (Function *F = CI->getCalledFunction()) {
         if (F->getIntrinsicID() == Intrinsic::dbg_value ||
             F->getIntrinsicID() == Intrinsic::dbg_declare) {
+          errs() << *CI << "\n";
+          errs() << *CI->getParent() << "\n";
           Metadata *valMeta =
               cast<MetadataAsValue>(CI->getOperand(0))->getMetadata();
           Metadata *varMeta =
@@ -6727,7 +6812,8 @@ void CWriter::printFunction(Function &F, bool inlineF) {
             }
           } else {
             errs() << "In function " << I->getFunction()->getName() << "\n";
-            assert(0 && "SUSAN: 1st argument is not a Value?\n");
+            continue;
+            //assert(0 && "SUSAN: 1st argument is not a Value?\n");
           }
         }
       }
@@ -7484,14 +7570,18 @@ bool CWriter::isSkipableInst(Instruction *inst) {
   if (omp_SkipVals.find(inst) != omp_SkipVals.end())
     return true;
   // if(skipInstsForPhis.find(inst) != skipInstsForPhis.end()) return true;
-  if (deadInsts.find(inst) != deadInsts.end())
+  if (deadInsts.find(inst) != deadInsts.end()) {
+    errs() << "Dead inst " << *inst << "\n";
     return true;
+  }
   if (deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end())
     return true;
   if (isa<PHINode>(inst))
     return true;
-  if (isInlinableInst(*inst))
+  if (isInlinableInst(*inst)) {
+    errs() << "Inlinable inst " << *inst << "\n";
     return true;
+  }
   if (isDirectAlloca(inst))
     return true;
   if (isIVIncrement(inst))
@@ -7579,8 +7669,10 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
       continue;
     if (inst->getMetadata("tulip.target.end.of.map"))
       continue;
-    if (isSkipableInst(inst))
+    if (isSkipableInst(inst)) {
+      errs() << "Skipping inst " << *inst << "\n";
       continue;
+    }
 
     /*
      * OpenMP: translate omp master
@@ -7839,8 +7931,9 @@ void CWriter::visitIndirectBrInst(IndirectBrInst &IBI) {
 void CWriter::visitUnreachableInst(UnreachableInst &I) {
   CurInstr = &I;
 
-  headerUseUnreachable();
-  Out << "  __builtin_unreachable();\n\n";
+  //Out << "exit(0);\n\n";
+  //headerUseUnreachable();
+  //Out << "  __builtin_unreachable();\n\n";
 }
 
 bool CWriter::isGotoCodeNecessary(BasicBlock *From, BasicBlock *To) {
@@ -9070,16 +9163,6 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
       headerUseMath();
       Out << "  r = trunc" << suffix << "(a);\n";
       break;
-
-    case Intrinsic::nvvm_lg2_approx_f:
-      headerUseMath();
-      Out << "  r = log2" << suffix << "(a);\n";
-      break;
-
-    case Intrinsic::nvvm_ex2_approx_f:
-      headerUseMath();
-      Out << "  r = exp2" << suffix << "(a);\n";
-      break;
     }
   }
 
@@ -9143,8 +9226,6 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::rint:
           case Intrinsic::sqrt:
           case Intrinsic::trunc:
-          case Intrinsic::nvvm_lg2_approx_f:
-          case Intrinsic::nvvm_ex2_approx_f:
           case Intrinsic::trap:
           case Intrinsic::stackprotector:
           case Intrinsic::dbg_value:
@@ -10205,8 +10286,6 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID) {
   case Intrinsic::sqrt:
   case Intrinsic::trap:
   case Intrinsic::trunc:
-  case Intrinsic::nvvm_lg2_approx_f:
-  case Intrinsic::nvvm_ex2_approx_f:
   case Intrinsic::nvvm_mul24_i:
     return false; // these use the normal function call emission
   }

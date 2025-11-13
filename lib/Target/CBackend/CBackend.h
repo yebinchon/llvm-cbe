@@ -131,6 +131,10 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
                                  std::make_pair(AttributeList(),
                                                 CallingConv::C));
 
+  BasicBlock* getSingleExitBlock(Loop* L);
+  bool isReturnOrExit(BasicBlock *BB);
+  LoopType getLoopType(Loop* L);
+
 
   private:
   //SUSAN: counters

@@ -48,6 +48,13 @@ using namespace llvm;
 
 namespace llvm_cbe {
 
+enum LoopType {
+  forLoop,
+  whileLoop,
+  doWhileLoop,
+  unknown
+};
+
 class CWriter;
 class CBERegion2;
 class LoopRegion;
@@ -103,7 +110,7 @@ class CBERegion2 {
   LoopInfo *LI;
   PostDominatorTree *PDT;
   DominatorTree *DT;
-  CBERegion2* createSubRegions(CBERegion2* parentR, BasicBlock* entryBB);
+  CBERegion2* createSubRegions(CBERegion2* parentR, BasicBlock* entryBB, BasicBlock* endBB = nullptr);
   CWriter *cw;
 
   private:
@@ -112,7 +119,7 @@ class CBERegion2 {
 
 class LinearRegion : public CBERegion2{
   public:
-  LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR, LoopInfo *LI, PostDominatorTree *PDT, DominatorTree *DT, CWriter *cwriter);
+  LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR, LoopInfo *LI, PostDominatorTree *PDT, DominatorTree *DT, CWriter *cwriter, BasicBlock *endBB);
   bool isaLoopRegion() override {return false;};
   bool isaLinearRegion() override {return true;};
   bool isaIfElseRegion() override {return false;};
@@ -146,6 +153,10 @@ class LoopRegion : public CBERegion2{
 
   void createCBERegionDAG(BasicBlock *entryBB);
 
+  void printDoWhileLoop();
+  void printWhileLoop();
+  void printForLoop();
+
   private:
   Loop *loop;
   CBERegion2 *parentRegion;
@@ -156,6 +167,7 @@ class LoopRegion : public CBERegion2{
   PHINode *IV;
   Instruction *IVInc;
   int nestlevel;
+  LoopType loopType;
 };
 
 class IfElseRegion : public CBERegion2 {
@@ -203,10 +215,25 @@ class IfElseRegion : public CBERegion2 {
     Instruction *ret = succ->getTerminator();
 
     if(isa<ReturnInst>(ret)) return succ;
-    else return nullptr;
+    
+    return nullptr;
   }
 
-  bool noElseRegion(bool trueBranch);
+  bool noElseRegion(bool trueBranch) {
+    std::set<BasicBlock *> branchBBs = trueBranch ? falseBBs : trueBBs;
+    bool NoElseRegion = true;
+    for (auto bb : branchBBs) {
+      for (auto &I : *bb) {
+        if (!isa<BranchInst>(&I)) {
+          NoElseRegion = false;
+          errs() << "No Else Region is false\n";
+          break;
+        }
+      }
+    }
+    return NoElseRegion;
+  }
+
   std::vector<CBERegion2*> thenSubRegions;
   std::vector<CBERegion2*> elseSubRegions;
   BasicBlock* brBB;

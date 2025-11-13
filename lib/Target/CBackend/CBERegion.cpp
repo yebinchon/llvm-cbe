@@ -1,9 +1,12 @@
 #include "CBackend.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/TargetLowering.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Host.h"
@@ -28,7 +31,7 @@ using namespace llvm;
 
 LinearRegion::LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR,
                            LoopInfo *LI, PostDominatorTree *PDT,
-                           DominatorTree *DT, CWriter *cwriter)
+                           DominatorTree *DT, CWriter *cwriter, BasicBlock* endBB)
     : CBERegion2{LI, PDT, DT, parentR, entryBB, cwriter} {
   /*for return block*/
   Instruction *term = entryBB->getTerminator();
@@ -41,35 +44,39 @@ LinearRegion::LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   BasicBlock *nextBB = entryBB;
   Loop *l = LI->getLoopFor(entryBB);
   LoopRegion *lr = getParentLoopRegion();
+  BranchInst* entryBranch = dyn_cast<BranchInst>(entryBB->getTerminator());
+  // This is a special case of do-while loop
+  if(l && entryBB == l->getLoopLatch() && entryBranch->isConditional()) {
+    BBs.push_back(entryBB);
+    nextEntryBB = l->getExitBlock();
+    return;
+  }
+
   while (true) {
     if (lr)
       lr->removeBBToVisit(nextBB);
     BBs.push_back(nextBB);
     errs() << "CBERegion: including " << nextBB->getName()
            << " in a linear region\n";
-    // if(nextBB) errs() << "CBERegion: nextBB " << *nextBB << "\n";
     nextBB = nextBB->getSingleSuccessor();
+    if(nextBB)
+      errs() << "Now looking at " << nextBB->getName() << "\n";
+
     nextEntryBB = nextBB;
     if (!nextBB || nextBB->getSingleSuccessor() == nullptr)
       break;
     Loop *lNextBB = LI->getLoopFor(nextBB);
+    if(lNextBB) {
+      errs() << lNextBB->getHeader()->getName() << " is the header\n";
+      errs() << lNextBB->getLoopLatch()->getName() << " is the latch\n";
+    }
     if (lNextBB && lNextBB->getLoopLatch() == nextBB)
       break;
+    if(lNextBB && lNextBB->getHeader() == nextBB)
+      break;
+    if(nextBB == endBB)
+      break;
   }
-}
-
-bool IfElseRegion::noElseRegion(bool trueBranch) {
-  std::set<BasicBlock *> branchBBs = trueBranch ? falseBBs : trueBBs;
-  bool NoElseRegion = true;
-  for (auto bb : branchBBs) {
-    for (auto &I : *bb) {
-      if (!isa<BranchInst>(&I)) {
-        NoElseRegion = false;
-        break;
-      }
-    }
-  }
-  return NoElseRegion;
 }
 
 IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
@@ -86,18 +93,52 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   assert(br && "not a branch inst to start if else region\n");
   this->trueStartBB = br->getSuccessor(0);
   this->falseStartBB = br->getSuccessor(1);
-  // FIXME: Ordering matters, this is the wrong way to do it
-  // for(auto &BB : *(brBB->getParent())) {
-  //   // YEBIN: skip itself!!
-  //   if(&BB == brBB) continue;
-  //   if(PDT->dominates(&BB, brBB)){
-  //     this->pdBB = &BB;
-  //     break;
-  //   }
-  // }
+
   // YEBIN: use LLVM IDom directly
   this->pdBB = PDT->getNode(brBB)->getIDom()->getBlock();
-  assert(this->pdBB && "PostDomBB of branch not found!!\n");
+  if(this->pdBB) errs() << this->pdBB->getName() << "\n";
+
+  bool trueBrOnly;
+  bool falseBrOnly;
+
+  // Control flow exits in if-else block
+  // Assume two ways of exiting: a return statement as the terminator
+  // OR going to the return block (this block must only have a return inst)
+  // BE CAREFUL OF: if-else statements that happen at end of function
+  // FIXME: this will only work for single level if-else statements
+  // Need more sophisticated return checking logic to handle nested statements
+  // Nested statements may require a bottom-up approach
+  bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
+  bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
+  // Four possible control flows: both exit, only one exits
+  // Both exits is likely at the end of the program
+  if (exitFunctionTrueBr && exitFunctionFalseBr) {
+    errs() << "Both branches exit function!!\n";
+  }
+  // These are easier - the one that exits is an "early exit" and the fall-through continues the rest of the program.
+  // Don't use the calculated postdominator!!
+  if (exitFunctionTrueBr) {
+    errs() << "True branch exits function!!\n";
+    trueBrOnly = true; 
+    // currently only works if the exit is in the start BB
+    //trueBBs.insert(trueStartBB);
+    // Goes to return block
+    if (auto *lr = getParentLoopRegion())
+      for (auto *BB : falseBBs)
+        lr->removeBBToVisit(BB);
+    createSubIfElseRegions(trueStartBB, brBB, falseStartBB, false);
+    nextEntryBB = falseStartBB;
+  }
+  else if (exitFunctionFalseBr) {
+    errs() << "False branch exits function!!\n";
+    falseBrOnly = true;
+    if (auto *lr = getParentLoopRegion())
+      for (auto *BB : trueBBs)
+        lr->removeBBToVisit(BB);
+    createSubIfElseRegions(falseStartBB, brBB, trueStartBB, true);
+    nextEntryBB = trueStartBB;
+  }
+  else {
 
   for (auto &BB : *(brBB->getParent())) {
     if (DT->dominates(trueStartBB, &BB) && PDT->dominates(pdBB, &BB) &&
@@ -107,10 +148,13 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
         pdBB != &BB)
       falseBBs.insert(&BB);
   }
-  bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
-  bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
-  bool trueBrOnly = noElseRegion(true);
-  bool falseBrOnly = noElseRegion(false);
+  // checking if the other branch section has branches???
+  //bool trueBrOnly = noElseRegion(true);
+  //bool falseBrOnly = noElseRegion(false);
+  // -1: neither branch leads to return
+  // 0: true branch leads to return
+  // 1: false branch leads to return
+  // This is weird... only works for very particular control flow
   int returnDominated = dominatedByReturn(brBB);
   if (!trueBrOnly && !falseBrOnly && returnDominated == -1) {
     trueBrOnly = (exitFunctionTrueBr && !exitFunctionFalseBr);
@@ -145,6 +189,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     removeIfElseBlockFromLR((LoopRegion *)parentR, brBB);
   errs() << "=================SUSAN: END OF marking region : "
          << br->getParent()->getName() << "==================\n";
+  }
 }
 
 BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
@@ -156,8 +201,12 @@ BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
     lr->removeBBToVisit(brBlock);
 
   BasicBlock *currBB = start;
+  // TODO: this is a hasty patch
+  errs() << start->getName() << " to " << brBlock->getName() << "\n";
+  errs() << "otherStart: " << otherStart->getName() << "\n";
+  errs() << PDT->dominates(currBB, brBlock) << "\n";
   while (!PDT->dominates(currBB, brBlock) && currBB != otherStart) {
-    CBERegion2 *subR = createSubRegions(this, currBB);
+    CBERegion2 *subR = createSubRegions(this, currBB, otherStart);
     if (!isElseBranch)
       thenSubRegions.push_back(subR);
     else
@@ -165,6 +214,7 @@ BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
     if (isa<UnreachableInst>(currBB->getTerminator()))
       break;
     currBB = subR->getNextEntryBB();
+    if(!currBB) break;
     errs() << "SUSAN: currbb 562: " << currBB->getName() << "\n";
   }
   return currBB;
@@ -183,7 +233,7 @@ void LoopRegion::createCBERegionDAG(BasicBlock *entryBB) {
       errs() << "Did not detect nextRegion\n";
     if (nextRegionEntryBB) {
       errs() << "SUSAN: nextRegionEntryBB " << nextRegionEntryBB->getName();
-      errs() << "for region: " << *(this->loop) << "\n";
+      errs() << " for region: " << *(this->loop) << "\n";
       // createCBERegionDAG(nextRegionEntryBB);
     }
   }
@@ -294,6 +344,7 @@ void IfElseRegion::printRegionDAG() {
   cw->Out << "  }\n";
 }
 
+
 void LoopRegion::printRegionDAG() {
   if (!this->parentRegion || this->parentRegion->isaLinearRegion()) {
     auto FuncName = demangleFunctionName(this->entryBlock->getParent()->getName());
@@ -301,6 +352,20 @@ void LoopRegion::printRegionDAG() {
   }
   errs() << "Loop Region with entering block: " << getEntryBlock()->getName()
          << "\n";
+
+  switch(this->loopType) {
+    case doWhileLoop:
+      errs() << "Print doWhileLoop " << loop->getName() << "...\n";
+      printDoWhileLoop();
+      return;
+    case whileLoop:
+      errs() << "Print whileLoop " << loop->getName() << "...\n";
+      printWhileLoop();
+      return;
+    case forLoop:
+      errs() << "Print forLoop " << loop->getName() << "...\n";
+      break;
+  }
 
   BasicBlock *header = loop->getHeader();
   bool negateCondition = false;
@@ -409,7 +474,7 @@ void LoopRegion::printRegionDAG() {
 
   // increment
   cw->printInstruction(cast<Instruction>(incr), false);
-  cw->Out << "){\n";
+  cw->Out << ") {\n";
 
   // print loop body
   for (auto R : LoopBodyRegionDAG)
@@ -422,6 +487,134 @@ void LoopRegion::printRegionDAG() {
     if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
       cw->printInstruction(&I);
   }
+
+  cw->Out << "}\n";
+}
+
+void LoopRegion::printDoWhileLoop() {
+  errs() << "PRINTING DOWHILE\n";
+  for(auto R: LoopBodyRegionDAG) {
+    R->print();
+  }
+  BasicBlock *header = loop->getHeader();
+  bool negateCondition = false;
+  Instruction *condInst = cw->findCondInst(loop, negateCondition);
+  errs() << *condInst << "\n";
+
+  std::set<Instruction *> printedLiveins;
+  // TODO: move to later?
+  // cond block should be latch
+  std::set<Value *> condRelatedInsts;
+  BasicBlock *condBlock = condInst->getParent();
+  cw->findCondRelatedInsts(condBlock, condRelatedInsts);
+  for (auto condRelatedInst : condRelatedInsts) {
+    Instruction *inst = cast<Instruction>(condRelatedInst);
+    if (isa<PHINode>(inst) || isa<BranchInst>(inst) || isa<CmpInst>(inst) ||
+        cw->isInlinableInst(*inst)) {
+      errs() << "YEBIN: not printing condrelatedinst:" << *inst << "\n";
+      continue;
+    }
+    errs() << "YEBIN: printing condRelatedInst: " << *inst << "\n";
+    cw->printInstruction(inst);
+  }
+
+  cw->Out << "do {\n";
+  // print things in header; this is not in another region
+  cw->printBasicBlock(loop->getHeader());
+
+  // print loop body
+  for (auto R : LoopBodyRegionDAG)
+    R->printRegionDAG();
+
+  // print extra instructions in a latch other than incr and br
+  //errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
+  //for (auto &I : *latchBB) {
+  //  errs() << "CBERegion: I 316: " << I << "\n";
+  //  if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
+  //    cw->printInstruction(&I);
+  //}
+
+  cw->Out << "} while(";
+
+  //exit condition
+  CmpInst *cmp = dyn_cast<CmpInst>(condInst);
+  // not the result of a comparison; single value
+  if(!cmp)
+    cw->writeOperand(condInst, cw->ContextCasted);
+  //cw->Out << cw->GetValueName(condInst->getOperand(0));
+  //if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
+  //  if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
+  //    cw->Out << " < ";
+  //  else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
+  //    cw->Out << " < ";
+  //  else
+  //    cw->printCmpOperator(icmp, negateCondition);
+  //}
+  //cw->writeOperandInternal(condInst->getOperand(1));
+
+  cw->Out << ");\n";
+}
+
+// FIXME: add print for while loop
+void LoopRegion::printWhileLoop() {
+  errs() << "PRINTING DOWHILE\n";
+
+  BasicBlock *header = loop->getHeader();
+  bool negateCondition = false;
+  Instruction *condInst = cw->findCondInst(loop, negateCondition);
+  errs() << *condInst << "\n";
+
+  std::set<Instruction *> printedLiveins;
+  // TODO: move to later?
+  // cond block should be latch
+  std::set<Value *> condRelatedInsts;
+  BasicBlock *condBlock = condInst->getParent();
+  cw->findCondRelatedInsts(condBlock, condRelatedInsts);
+  for (auto condRelatedInst : condRelatedInsts) {
+    Instruction *inst = cast<Instruction>(condRelatedInst);
+    if (isa<PHINode>(inst) || isa<BranchInst>(inst) || isa<CmpInst>(inst) ||
+        cw->isInlinableInst(*inst)) {
+      errs() << "YEBIN: not printing condrelatedinst:" << *inst << "\n";
+      continue;
+    }
+    errs() << "YEBIN: printing condRelatedInst: " << *inst << "\n";
+    cw->printInstruction(inst);
+  }
+  // print things in header; this is not in another region
+  cw->printBasicBlock(loop->getHeader());
+
+  cw->Out << "while (";
+  //exit condition
+  CmpInst *cmp = dyn_cast<CmpInst>(condInst);
+  // not the result of a comparison; single value
+  if(!cmp)
+    cw->writeOperand(condInst, cw->ContextCasted);
+  else {
+    cw->Out << cw->GetValueName(condInst->getOperand(0));
+    if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
+      if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
+        cw->Out << " < ";
+      else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
+        cw->Out << " < ";
+      else
+        cw->printCmpOperator(icmp, negateCondition);
+    }
+    cw->writeOperandInternal(condInst->getOperand(1));
+  }
+  cw->Out << ") {\n";
+
+  // print loop body
+  for (auto R : LoopBodyRegionDAG) {
+    R->printRegionDAG();
+  }
+
+  // print extra instructions in a latch other than incr and br
+  //errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
+  //for (auto &I : *latchBB) {
+  //  errs() << "CBERegion: I 316: " << I << "\n";
+  //  if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
+  //    cw->printInstruction(&I);
+  //}
 
   cw->Out << "}\n";
 }
@@ -450,28 +643,68 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
 
   parentRegion = parentR;
   loop = LI->getLoopFor(entryBB);
+  assert(loop && "cannot find loop for a loop region\n");
+
   latchBB = loop->getLoopLatch();
   errs() << "YEBIN For Loop " << loop->getHeader()->getParent()->getName()
          << "::" << loop->getName() << "\n";
-  this->IV = cw->getInductionVariable(loop);
-  this->IVInc = cw->getIVIncrement(loop, IV);
-  if (LI->getLoopFor(IV->getIncomingBlock(0)) != loop)
-    this->lb = IV->getIncomingValue(0);
-  else if ((LI->getLoopFor(IV->getIncomingBlock(0)) == loop))
-    this->incr = IV->getIncomingValue(0);
-  if (LI->getLoopFor(IV->getIncomingBlock(1)) != loop)
-    this->lb = IV->getIncomingValue(1);
-  else if ((LI->getLoopFor(IV->getIncomingBlock(1)) == loop))
-    this->incr = IV->getIncomingValue(1);
-  bool negateCondition = false;
-  Instruction *condInst = cw->findCondInst(loop, negateCondition);
-  this->ub = condInst->getOperand(1);
-
+  this->loopType = cw->getLoopType(loop);
+  errs() << "YEBIN: LOOP TYPE " << loopType << "\n";
   this->nestlevel = LI->getLoopDepth(entryBB);
 
-  assert(loop && "cannot find loop for a loop region\n");
-  nextEntryBB = loop->getUniqueExitBlock();
+  nextEntryBB = cw->getSingleExitBlock(loop);
+  errs() << "Unique Exit Block " << nextEntryBB->getName() << "\n";
+  errs() << *nextEntryBB << "\n";
   assert(nextEntryBB && "loop doesn't have unique exit block\n");
+
+  BasicBlock *startBB = entryBB;
+  BasicBlock *succ0, *succ1;
+  bool negateCondition = false;
+  switch(this->loopType) {
+    case doWhileLoop:
+      errs() << "Found doWhileLoop " << loop->getName() << "\n";
+      startBB = entryBB->getUniqueSuccessor();
+      assert(startBB && "Cannot find unique sucessor of header!\n");
+      break;
+    case whileLoop:
+      errs() << "Found whileLoop " << loop->getName() << "\n";
+      //TODO: deal with while loops
+      succ0 = dyn_cast<BranchInst>(entryBB->getTerminator())->getSuccessor(0);
+      succ1 = dyn_cast<BranchInst>(entryBB->getTerminator())->getSuccessor(1);
+      if (succ0 == nextEntryBB)
+        startBB = succ1;
+      else if (succ1 == nextEntryBB)
+        startBB = succ0;
+      else
+        assert(0 && "exit block is not from header!\n");
+      errs() << "StartBB: " << startBB->getName() << "\n";    
+      break;
+    case forLoop:
+      this->IV = cw->getInductionVariable(loop);
+      this->IVInc = cw->getIVIncrement(loop, IV);
+      if (LI->getLoopFor(IV->getIncomingBlock(0)) != loop)
+        this->lb = IV->getIncomingValue(0);
+      else if ((LI->getLoopFor(IV->getIncomingBlock(0)) == loop))
+        this->incr = IV->getIncomingValue(0);
+      if (LI->getLoopFor(IV->getIncomingBlock(1)) != loop)
+        this->lb = IV->getIncomingValue(1);
+      else if ((LI->getLoopFor(IV->getIncomingBlock(1)) == loop))
+        this->incr = IV->getIncomingValue(1);
+      this->ub = cw->findCondInst(loop, negateCondition)->getOperand(1);
+      succ0 = dyn_cast<BranchInst>(entryBB->getTerminator())->getSuccessor(0);
+      succ1 = dyn_cast<BranchInst>(entryBB->getTerminator())->getSuccessor(1);
+
+      if (succ0 == nextEntryBB)
+        startBB = succ1;
+      else if (succ1 == nextEntryBB)
+        startBB = succ0;
+      else
+        assert(0 && "exit block is not from header!\n");
+      break;
+    default:
+      assert(0 && "Not a valid loop type! Do you have gotos?\n");
+  }
+  
 
   auto loopBBs = loop->getBlocks();
   LoopRegion *lr = getParentLoopRegion();
@@ -482,25 +715,13 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
       addBBToVisit(BB);
   }
 
-  BasicBlock *startBB = entryBB;
-  auto br = dyn_cast<BranchInst>(entryBB->getTerminator());
-  auto succ0 = br->getSuccessor(0);
-  auto succ1 = br->getSuccessor(1);
-
-  BasicBlock *bodyBB = nullptr;
-  if (succ0 == nextEntryBB)
-    startBB = succ1;
-  else if (succ1 == nextEntryBB)
-    startBB = succ0;
-  else
-    assert(0 && "exit block is not from header!\n");
   errs() << "YEBIN CBERegion: startBB 393: " << startBB->getParent()->getName()
          << "::" << startBB->getName() << "\n";
   createCBERegionDAG(startBB);
 }
 
 CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
-                                         BasicBlock *entryBB) {
+                                         BasicBlock *entryBB, BasicBlock *endBB) {
   CBERegion2 *R = nullptr;
   if (!parentR) {
     errs() << "YEBIN: new topmost region\n";
@@ -521,7 +742,7 @@ CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
   switch (whichRegion(entryBB, LI)) {
   case 0: {
     errs() << "SUSAN: block is a linear region! " << entryBB->getName() << "\n";
-    R = new LinearRegion(entryBB, parentR, LI, PDT, DT, this->cw);
+    R = new LinearRegion(entryBB, parentR, LI, PDT, DT, this->cw, endBB);
     break;
   }
   case 1: {
