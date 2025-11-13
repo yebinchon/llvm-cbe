@@ -96,21 +96,17 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
 
   // YEBIN: use LLVM IDom directly
   this->pdBB = PDT->getNode(brBB)->getIDom()->getBlock();
-<<<<<<< HEAD
   if(this->pdBB) errs() << this->pdBB->getName() << "\n";
 
   bool trueBrOnly;
   bool falseBrOnly;
 
-=======
->>>>>>> 59c51ae8bb4683e790de0622e3f2f077f5fc2416
   // Control flow exits in if-else block
   // Assume two ways of exiting: a return statement as the terminator
   // OR going to the return block (this block must only have a return inst)
   // BE CAREFUL OF: if-else statements that happen at end of function
   // FIXME: this will only work for single level if-else statements
   // Need more sophisticated return checking logic to handle nested statements
-<<<<<<< HEAD
   // Nested statements may require a bottom-up approach
   bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
   bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
@@ -143,51 +139,6 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     nextEntryBB = trueStartBB;
   }
   else {
-=======
-    
-  if(!this->pdBB) {
-    auto* trueTerm = trueStartBB->getTerminator();
-    auto* falseTerm = falseStartBB->getTerminator();
-    if(isa<ReturnInst>(trueTerm)) {
-      errs() << "The True branch is a return block!!\n";
-      this->pdBB = falseStartBB;
-    }
-    else if(auto* trueBranch = dyn_cast<BranchInst>(trueTerm)) {
-      if(trueBranch->isUnconditional()) {
-        BasicBlock* trueSucc = trueBranch->getSuccessor(0);
-        // Check if it is a return-only block
-        if(isa<ReturnInst>(trueSucc->getFirstNonPHIOrDbgOrLifetime())) {
-          errs() << "Change terminator to a return!!\n";
-          auto* trueRet = dyn_cast<ReturnInst>(trueSucc->getTerminator());
-          Value* retVal = nullptr;
-          // Return with value
-          if(trueRet->getNumOperands()) {
-            retVal = trueRet->getOperand(0);
-          }
-          auto *newTerm = ReturnInst::Create(trueTerm->getContext(), retVal, trueTerm);
-          errs() << *trueStartBB << "\n";
-          trueTerm->eraseFromParent();
-          this->pdBB = falseStartBB;
-        }
-      }
-    }
-    // FIXME: check false branch
-    if(isa<ReturnInst>(falseTerm)) {
-      errs() << "The false branch is a return block!!\n";
-    }
-    else if(auto* falseBranch = dyn_cast<BranchInst>(falseTerm)) {
-      if(falseBranch->isUnconditional()) {
-        BasicBlock* falseSucc = falseBranch->getSuccessor(0);
-        // Check if it is a return-only block
-        if(isa<ReturnInst>(falseSucc->getFirstNonPHIOrDbgOrLifetime())) {
-          errs() << "The false branch goes to a return block!!\n";
-        }
-      }
-    }
-  }
-
-  // assert(this->pdBB && "PostDomBB of branch not found!!\n");
->>>>>>> 59c51ae8bb4683e790de0622e3f2f077f5fc2416
 
   for (auto &BB : *(brBB->getParent())) {
     if (DT->dominates(trueStartBB, &BB) && PDT->dominates(pdBB, &BB) &&
