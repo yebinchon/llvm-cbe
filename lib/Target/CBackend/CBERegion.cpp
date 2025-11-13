@@ -96,17 +96,21 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
 
   // YEBIN: use LLVM IDom directly
   this->pdBB = PDT->getNode(brBB)->getIDom()->getBlock();
+<<<<<<< HEAD
   if(this->pdBB) errs() << this->pdBB->getName() << "\n";
 
   bool trueBrOnly;
   bool falseBrOnly;
 
+=======
+>>>>>>> 59c51ae8bb4683e790de0622e3f2f077f5fc2416
   // Control flow exits in if-else block
   // Assume two ways of exiting: a return statement as the terminator
   // OR going to the return block (this block must only have a return inst)
   // BE CAREFUL OF: if-else statements that happen at end of function
   // FIXME: this will only work for single level if-else statements
   // Need more sophisticated return checking logic to handle nested statements
+<<<<<<< HEAD
   // Nested statements may require a bottom-up approach
   bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
   bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
@@ -139,6 +143,51 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     nextEntryBB = trueStartBB;
   }
   else {
+=======
+    
+  if(!this->pdBB) {
+    auto* trueTerm = trueStartBB->getTerminator();
+    auto* falseTerm = falseStartBB->getTerminator();
+    if(isa<ReturnInst>(trueTerm)) {
+      errs() << "The True branch is a return block!!\n";
+      this->pdBB = falseStartBB;
+    }
+    else if(auto* trueBranch = dyn_cast<BranchInst>(trueTerm)) {
+      if(trueBranch->isUnconditional()) {
+        BasicBlock* trueSucc = trueBranch->getSuccessor(0);
+        // Check if it is a return-only block
+        if(isa<ReturnInst>(trueSucc->getFirstNonPHIOrDbgOrLifetime())) {
+          errs() << "Change terminator to a return!!\n";
+          auto* trueRet = dyn_cast<ReturnInst>(trueSucc->getTerminator());
+          Value* retVal = nullptr;
+          // Return with value
+          if(trueRet->getNumOperands()) {
+            retVal = trueRet->getOperand(0);
+          }
+          auto *newTerm = ReturnInst::Create(trueTerm->getContext(), retVal, trueTerm);
+          errs() << *trueStartBB << "\n";
+          trueTerm->eraseFromParent();
+          this->pdBB = falseStartBB;
+        }
+      }
+    }
+    // FIXME: check false branch
+    if(isa<ReturnInst>(falseTerm)) {
+      errs() << "The false branch is a return block!!\n";
+    }
+    else if(auto* falseBranch = dyn_cast<BranchInst>(falseTerm)) {
+      if(falseBranch->isUnconditional()) {
+        BasicBlock* falseSucc = falseBranch->getSuccessor(0);
+        // Check if it is a return-only block
+        if(isa<ReturnInst>(falseSucc->getFirstNonPHIOrDbgOrLifetime())) {
+          errs() << "The false branch goes to a return block!!\n";
+        }
+      }
+    }
+  }
+
+  // assert(this->pdBB && "PostDomBB of branch not found!!\n");
+>>>>>>> 59c51ae8bb4683e790de0622e3f2f077f5fc2416
 
   for (auto &BB : *(brBB->getParent())) {
     if (DT->dominates(trueStartBB, &BB) && PDT->dominates(pdBB, &BB) &&
@@ -460,7 +509,9 @@ void LoopRegion::printRegionDAG() {
   cw->Out << "; ";
 
   // exit condition
-  cw->Out << cw->GetValueName(condInst->getOperand(0));
+  // Use writeOperandInternal instead of GetValueName to properly handle
+  // conversion instructions and get the correct variable name
+  cw->writeOperandInternal(condInst->getOperand(0));
   if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
     if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
       cw->Out << " < ";
@@ -468,6 +519,37 @@ void LoopRegion::printRegionDAG() {
       cw->Out << " < ";
     else
       cw->printCmpOperator(icmp, negateCondition);
+  } else if (FCmpInst *fcmp = dyn_cast<FCmpInst>(condInst)) {
+    // Handle float comparisons
+    CmpInst::Predicate pred = fcmp->getPredicate();
+    if (negateCondition) {
+      // Negate the predicate
+      switch (pred) {
+        case FCmpInst::FCMP_OEQ: pred = FCmpInst::FCMP_ONE; break;
+        case FCmpInst::FCMP_ONE: pred = FCmpInst::FCMP_OEQ; break;
+        case FCmpInst::FCMP_OGT: pred = FCmpInst::FCMP_OLE; break;
+        case FCmpInst::FCMP_OGE: pred = FCmpInst::FCMP_OLT; break;
+        case FCmpInst::FCMP_OLT: pred = FCmpInst::FCMP_OGE; break;
+        case FCmpInst::FCMP_OLE: pred = FCmpInst::FCMP_OGT; break;
+        default: break;
+      }
+    }
+    switch (pred) {
+      case FCmpInst::FCMP_OEQ: cw->Out << " == "; break;
+      case FCmpInst::FCMP_ONE: cw->Out << " != "; break;
+      case FCmpInst::FCMP_OGT: cw->Out << " > "; break;
+      case FCmpInst::FCMP_OGE: cw->Out << " >= "; break;
+      case FCmpInst::FCMP_OLT: cw->Out << " < "; break;
+      case FCmpInst::FCMP_OLE: cw->Out << " <= "; break;
+      case FCmpInst::FCMP_UEQ: cw->Out << " == "; break;
+      case FCmpInst::FCMP_UNE: cw->Out << " != "; break;
+      case FCmpInst::FCMP_UGT: cw->Out << " > "; break;
+      case FCmpInst::FCMP_UGE: cw->Out << " >= "; break;
+      case FCmpInst::FCMP_ULT: cw->Out << " < "; break;
+      case FCmpInst::FCMP_ULE: cw->Out << " <= "; break;
+      default:
+        llvm_unreachable("Unhandled FCmpInst predicate in loop condition");
+    }
   }
   cw->writeOperandInternal(condInst->getOperand(1));
   cw->Out << "; ";

@@ -4916,6 +4916,8 @@ void CWriter::generateHeader(Module &M) {
   // size_t Function_Order_ID = 0;
 
   for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
+
+    errs() << "ANDREW: function name: " << (&*I)->getName() << "\n";
     /*
      * OpenMP: skip declaring kmpc functions
      */
@@ -4950,7 +4952,9 @@ void CWriter::generateHeader(Module &M) {
       continue;
     if ((&*I)->getName().contains("atoi"))
       continue;
-    if ((&*I)->getName().contains("rand"))
+
+    // ANDREW: MORE PRINCIPLED FIX NEEDS TO BE DONE HERE
+    if ((&*I)->getName() == "rand")
       continue;
     if ((&*I)->getName().contains("fopen"))
       continue;
@@ -4961,7 +4965,86 @@ void CWriter::generateHeader(Module &M) {
     if ((&*I)->getName().contains("memcpy"))
       continue;
     // Do not print any cuda functions, they should not be in the code
-    if((&*I)->getName().contains("cuda"))
+    // Check for specific CUDA runtime API functions
+    if ((&*I)->getName().contains("cudaBindTextureToArray"))
+      continue;
+    if ((&*I)->getName().contains("cudaBindTexture"))
+      continue;
+    if ((&*I)->getName().contains("cudaConfigureCall"))
+      continue;
+    if ((&*I)->getName().contains("cudaCreateChannelDesc"))
+      continue;
+    if ((&*I)->getName().contains("cudaDeviceSynchronize"))
+      continue;
+    if ((&*I)->getName().contains("cudaEventElapsedTime"))
+      continue;
+    if ((&*I)->getName().contains("cudaEventRecord"))
+      continue;
+    if ((&*I)->getName().contains("cudaEventSynchronize"))
+      continue;
+    if ((&*I)->getName().contains("cudaEventCreate"))
+      continue;
+    if ((&*I)->getName().contains("cudaFreeArray"))
+      continue;
+    if ((&*I)->getName().contains("cudaFreeHost"))
+      continue;
+    if ((&*I)->getName().contains("cudaFree"))
+      continue;
+    if ((&*I)->getName().contains("cudaFuncSetCacheConfig"))
+      continue;
+    if ((&*I)->getName().contains("cudaGetDeviceProperties"))
+      continue;
+    if ((&*I)->getName().contains("cudaGetDeviceCount"))
+      continue;
+    if ((&*I)->getName().contains("cudaGetDevice"))
+      continue;
+    if ((&*I)->getName().contains("cudaGetErrorString"))
+      continue;
+    if ((&*I)->getName().contains("cudaGetLastError"))
+      continue;
+    if ((&*I)->getName().contains("cudaLaunch"))
+      continue;
+    if ((&*I)->getName().contains("cudaMallocPitch"))
+      continue;
+    if ((&*I)->getName().contains("cudaMallocHost"))
+      continue;
+    if ((&*I)->getName().contains("cudaMallocArray"))
+      continue;
+    if ((&*I)->getName().contains("cudaMalloc"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemcpyToSymbol"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemcpyToArray"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemcpyAsync"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemcpy2D"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemcpy"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemGetInfo"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemsetAsync"))
+      continue;
+    if ((&*I)->getName().contains("cudaMemset"))
+      continue;
+    if ((&*I)->getName().contains("cudaSetDevice"))
+      continue;
+    if ((&*I)->getName().contains("cudaSetupArgument"))
+      continue;
+    if ((&*I)->getName().contains("cudaStreamCreate"))
+      continue;
+    if ((&*I)->getName().contains("cudaStreamDestroy"))
+      continue;
+    if ((&*I)->getName().contains("cudaStreamSynchronize"))
+      continue;
+    if ((&*I)->getName().contains("cudaStreamWaitEvent"))
+      continue;
+    if ((&*I)->getName().contains("cudaThreadExit"))
+      continue;
+    if ((&*I)->getName().contains("cudaThreadSynchronize"))
+      continue;
+    if ((&*I)->getName().contains("cudaUnbindTexture"))
       continue;
     // if((&*I)->getName().contains("xmalloc")) continue;
     //  Don't print declarations for intrinsic functions.
