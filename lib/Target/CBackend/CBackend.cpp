@@ -1259,9 +1259,16 @@ LoopType CWriter::getLoopType(Loop* loop) {
 
   if(auto IV = getInductionVariable(loop)) {
     errs() << "Found IV!\n\t"<< *IV << "\n";
-    if(cmp->getOperand(0) != IV && cmp->getOperand(1) != IV)
-      return whileLoop;
-    return forLoop;
+    if(cmp->getOperand(0) == IV && cmp->getOperand(1) == IV)
+      return forLoop;
+    // TODO: check for more than one level of casting
+    // Does this happen??
+    if(auto castOp0 = dyn_cast<CastInst>(cmp->getOperand(0)))
+      if(castOp0->getOperand(0) == IV)
+        return forLoop;
+    if(auto castOp1 = dyn_cast<CastInst>(cmp->getOperand(1)))
+      if(castOp1->getOperand(0) == IV)
+        return forLoop;
   }
 
   return whileLoop;
