@@ -44,6 +44,7 @@
 // SUSAN: added libs
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
 // YEBIN: added libs
@@ -1259,7 +1260,7 @@ LoopType CWriter::getLoopType(Loop* loop) {
 
   if(auto IV = getInductionVariable(loop)) {
     errs() << "Found IV!\n\t"<< *IV << "\n";
-    if(cmp->getOperand(0) == IV && cmp->getOperand(1) == IV)
+    if(cmp->getOperand(0) == IV || cmp->getOperand(1) == IV)
       return forLoop;
     // TODO: check for more than one level of casting
     // Does this happen??
@@ -1326,18 +1327,29 @@ void CWriter::preprocessLoopProfiles(Function &F) {
 
     errs() << "Not skipping " << L->getName() << "\n";
     PHINode *IV = getInductionVariable(L);
-    BasicBlock* exitBlock = getSingleExitBlock(L);
     // handle case where loop is while but has an indvar
     errs() << "Header and latch\n";
     errs() << *L->getHeader() << *L->getLoopLatch() << "\n";
-    bool exitFromLatch = (exitBlock->getSinglePredecessor() == L->getLoopLatch());
     BranchInst* lBr = dyn_cast<BranchInst>(L->getHeader()->getTerminator());
     bool cmpWithIV = false;
-    if(lBr && lBr->isConditional())
-      if(CmpInst* lCmp = dyn_cast<CmpInst>(lBr->getCondition()))
+    if(lBr && lBr->isConditional()) {
+      if(CmpInst* lCmp = dyn_cast<CmpInst>(lBr->getCondition())) {
+        errs() << "Found lCmp: " << *lCmp << "\n";
+        errs() << "IV: " << *IV << "\n";
+        errs() << "Operands: " << *(lCmp->getOperand(0)) << " , "
+               << *(lCmp->getOperand(1)) << "\n";
         if(lCmp->getOperand(0) == IV || lCmp->getOperand(1) == IV)
             cmpWithIV = true;
-    bool isaForLoop = exitFromLatch && cmpWithIV;
+        else if(auto castOp0 = dyn_cast<CastInst>(lCmp->getOperand(0)))
+          if(castOp0->getOperand(0) == IV)
+            cmpWithIV = true;
+        else if(auto castOp1 = dyn_cast<CastInst>(lCmp->getOperand(1)))
+          if(castOp1->getOperand(0) == IV)
+            cmpWithIV = true;
+      }
+    }
+    // it should be enough to just check whether the exit condition is from IV
+    bool isaForLoop = cmpWithIV;
     if (!isaForLoop) {
       errs() << "SUSAN: recording while loop profile:" << *L << "\n";
       LoopProfile *LP = new LoopProfile();
