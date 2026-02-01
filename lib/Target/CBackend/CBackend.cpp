@@ -9334,6 +9334,8 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::dbg_declare:
           case Intrinsic::nvvm_mul24_i:
           case Intrinsic::nvvm_barrier0:
+          case Intrinsic::nvvm_fabs_d:
+          case Intrinsic::nvvm_fabs_f:
             // We directly implement these intrinsics
             break;
 
@@ -10390,6 +10392,16 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID) {
   case Intrinsic::trunc:
   case Intrinsic::nvvm_mul24_i:
     return false; // these use the normal function call emission
+  case Intrinsic::nvvm_fabs_d:
+    Out << "fabs(";
+    writeOperand(I.getArgOperand(0), ContextCasted);
+    Out << ")";
+    return true;
+  case Intrinsic::nvvm_fabs_f:
+    Out << "fabsf(";
+    writeOperand(I.getArgOperand(0), ContextCasted);
+    Out << ")";
+    return true;
   }
 }
 
