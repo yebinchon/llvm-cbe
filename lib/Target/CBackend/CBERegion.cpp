@@ -207,6 +207,7 @@ BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
   errs() << PDT->dominates(currBB, brBlock) << "\n";
   while (!PDT->dominates(currBB, brBlock) && currBB != otherStart) {
     CBERegion2 *subR = createSubRegions(this, currBB, otherStart);
+    if (!subR) break;
     if (!isElseBranch)
       thenSubRegions.push_back(subR);
     else
@@ -224,6 +225,7 @@ void LoopRegion::createCBERegionDAG(BasicBlock *entryBB) {
   BasicBlock *nextRegionEntryBB = entryBB;
   while (!this->hasNoRemainingBBs()) {
     CBERegion2 *entryR = createSubRegions(this, nextRegionEntryBB);
+    if (!entryR) break;
     LoopBodyRegionDAG.push_back(entryR);
     if (entryBB == this->latchBB)
       return;
@@ -248,6 +250,7 @@ void CBERegion2::createCBERegionDAG(BasicBlock *entryBB, CBERegion2 *parentR,
   errs() << "YEBIN: creating CBE Region with " << entryBB->getName() << " to "
          << endBB->getName() << "\n";
   CBERegion2 *entryR = createSubRegions(parentR, entryBB);
+  if (!entryR) return;
   CBERegionDAG.push_back(entryR);
   if (entryBB == endBB)
     return;
@@ -756,6 +759,21 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
 CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
                                          BasicBlock *entryBB, BasicBlock *endBB) {
   CBERegion2 *R = nullptr;
+  // Backedge detection: if entryBB is the header of any ancestor loop region, stop recursion.
+  CBERegion2 *ancestor = parentR;
+  while (ancestor) {
+    if (ancestor->isaLoopRegion()) {
+      LoopRegion *LR = static_cast<LoopRegion*>(ancestor);
+
+      // If the entryBB is the header of an ancestor loop region, stop traversal.
+      if (LR->getLoop()->getHeader() == entryBB) {
+        errs() << "ANDREW: CBERegion: detected backedge to header of loop " << entryBB->getName() << ", stopping traversal\n";
+        return nullptr;
+      }
+    }
+    ancestor = ancestor->getParentRegion();
+  }
+
   if (!parentR) {
     errs() << "YEBIN: new topmost region\n";
   } else {
