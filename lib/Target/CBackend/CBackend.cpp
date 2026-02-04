@@ -891,7 +891,9 @@ Instruction *CWriter::getIVIncrement(Loop *L, PHINode *IV) {
 }
 
 PHINode *CWriter::getInductionVariable(Loop *L) {
-  //errs() << "trying to get IV for Loop:" << *L << "\n";
+
+  errs() << "ANDREW: getInductionVariable\n";
+  errs() << "trying to get IV for Loop:" << L->getHeader()->getName() << "\n";
   PHINode *InnerIndexVar = L->getCanonicalInductionVariable();
   if (InnerIndexVar) {
     errs() << "SUSAN: found IV 784" << *InnerIndexVar << "\n";
@@ -983,6 +985,21 @@ Loop *CWriter::findLoopAccordingTo(Function &F, Value *bound) {
 void CWriter::preprossesPHIs2Print(Function &F) {
   std::map<PHINode *, PHINode *> phiLoops;
 
+  // Helper lambda to check if adding key -> value would create a cycle
+  // by checking if value transitively maps back to key
+  auto wouldCreateCycle = [this](Value *key, Value *value) -> bool {
+    std::set<Value*> visited;
+    Value *current = value;
+    while (current) {
+      if (current == key) return true;  // Cycle detected
+      if (!visited.insert(current).second) return false; // Hit a different cycle, not involving key
+      auto it = InstsToReplaceByPhi.find(current);
+      if (it == InstsToReplaceByPhi.end()) return false; // End of chain
+      current = it->second;
+    }
+    return false;
+  };
+
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I)
     if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
 
@@ -992,9 +1009,15 @@ void CWriter::preprossesPHIs2Print(Function &F) {
       StoreInst *stInst = nullptr;
 
       if (isInductionVariable(phi))
+      {
+        errs() << "YEBIN: this is an iv: " << *phi << "\n";
         continue;
+      }
       if (isExtraInductionVariable(phi))
+       {
+        errs() << "YEBIN: this is an extra iv: " << *phi << "\n";
         continue;
+       }
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         BasicBlock *predBB = phi->getIncomingBlock(i);
         Value *phiVal = phi->getIncomingValue(i);
@@ -1006,6 +1029,8 @@ void CWriter::preprossesPHIs2Print(Function &F) {
               IRNaming.insert(std::make_pair(ld, "stderr"));
             }
           if (!skipStderr) {
+            errs() << "YEBIN: PHI to print: " << *phi << "\n";
+            errs() << "     from predBB: " << predBB->getName() << "\n";
             PHIValues2Print.insert(std::make_pair(predBB, phi));
           }
         }
@@ -1028,11 +1053,29 @@ void CWriter::preprossesPHIs2Print(Function &F) {
 
         if (Instruction *incomingInst = dyn_cast<Instruction>(phiVal)) {
           if (deleteAndReplaceInsts.find(incomingInst) !=
-              deleteAndReplaceInsts.end())
-            InstsToReplaceByPhi[deleteAndReplaceInsts[incomingInst]] =
-                replaceVal;
-          else
-            InstsToReplaceByPhi[phiVal] = replaceVal;
+              deleteAndReplaceInsts.end()) {
+            Value *keyVal = deleteAndReplaceInsts[incomingInst];
+            // Only add mapping if it doesn't create a cycle
+            if (!wouldCreateCycle(keyVal, replaceVal)) {
+              errs() << "YEBIN: replacing PHI deleteInsts: " << *keyVal
+                     << " with " << *replaceVal << "\n";
+              InstsToReplaceByPhi[keyVal] = replaceVal;
+            } else {
+              errs() << "YEBIN: SKIPPING cycle-creating mapping: " << *keyVal
+                     << " -> " << *replaceVal << "\n";
+            }
+          }
+          else {
+            // Only add mapping if it doesn't create a cycle
+            if (!wouldCreateCycle(phiVal, replaceVal)) {
+              errs() << "YEBIN: replacing PHI incomingInst: " << *incomingInst
+                     << " with " << *replaceVal << "\n";
+              InstsToReplaceByPhi[phiVal] = replaceVal;
+            } else {
+              errs() << "YEBIN: SKIPPING cycle-creating mapping: " << *phiVal
+                     << " -> " << *replaceVal << "\n";
+            }
+          }
         }
       }
     }
@@ -1200,16 +1243,25 @@ Value *CWriter::findOriginalValue(Value *val) {
         if (store->getPointerOperand() == val)
           newVal = store->getOperand(0);
 
+  std::set<Value*> visited;
   while (isa<CastInst>(newVal) || isa<LoadInst>(newVal) ||
          (isa<PHINode>(newVal) && !isInductionVariable(newVal) &&
           !isExtraInductionVariable(newVal))) {
+    if (!visited.insert(newVal).second) break; // Cycle detected
+
     Instruction *currInst = cast<Instruction>(newVal);
     if (isa<CastInst>(newVal) || isa<LoadInst>(newVal))
       newVal = currInst->getOperand(0);
     else if (isa<PHINode>(newVal)) {
       PHINode *phi = dyn_cast<PHINode>(currInst);
-      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
-        newVal = phi->getIncomingValue(i);
+      if (phi->getNumIncomingValues() > 0)
+        newVal = phi->getIncomingValue(0); // Take first incoming value as representative heuristic
+      else
+        break;
+      // Note: The previous logic iterated all incoming values and took the last one.
+      // This seems arbitrary and likely unintended. Taking the first one is simpler and deterministic.
+      // Ideally we would search for a non-PHI source, but without context (e.g. which path taken), 
+      // traversing PHIs statically is ambiguous.
     }
   }
 
@@ -2478,30 +2530,44 @@ bool CWriter::isInductionVariable(Value *V) {
 }
 
 bool CWriter::isExtraInductionVariable(Value *V) {
-  if (!V)
-    return false;
-  PHINode *phi = dyn_cast<PHINode>(V);
-  if (!phi)
-    return false;
 
+  errs() << "ANDREW: isExtraInductionVariable: " << *V << "\n";
+  if (!V) {
+    errs() << "ANDREW: isExtraInductionVariable: V is null\n";
+    return false;
+  }
+  PHINode *phi = dyn_cast<PHINode>(V);
+  
+  if (!phi) {
+    errs() << "ANDREW: isExtraInductionVariable: not a PHI\n";
+    return false;
+  }
   Loop *L = LI->getLoopFor(phi->getParent());
-  if (!L)
+  if (!L) {
+    errs() << "ANDREW: isExtraInductionVariable: Loop is null\n";
     return false;
-  if (L && getInductionVariable(L) == phi)
+  }
+  if (L && getInductionVariable(L) == phi) {
+    errs() << "ANDREW: isExtraInductionVariable: is main IV. PHI: " << *phi << "\n"; 
     return false;
+  }
 
   Type *PhiTy = phi->getType();
   if (!PhiTy->isIntegerTy() && !PhiTy->isFloatingPointTy() &&
       !PhiTy->isPointerTy()) {
+    errs() << "ANDREW: isExtraInductionVariable: not int/float/ptr type\n";
     return false;
   }
 
   const SCEVAddRecExpr *AddRec = nullptr;
   if (SE->isSCEVable(PhiTy))
     AddRec = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(phi));
-  if (!AddRec || !AddRec->isAffine())
+  if (!AddRec || !AddRec->isAffine()) {
+    errs() << "ANDREW: isExtraInductionVariable: not affine SCEV\n";
     return false;
+  }
 
+  errs() << "ANDREW: isExtraInductionVariable: found extra IV. PHI: " << *phi << "\n";
   return true;
 }
 
@@ -3987,9 +4053,26 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
   }
 
   if (InstsToReplaceByPhi.find(Operand) != InstsToReplaceByPhi.end()) {
-    writeOperand(InstsToReplaceByPhi[Operand]);
-    return;
+    // Follow the replacement chain iteratively with cycle detection as a safety net
+    std::set<Value*> Visited;
+    Value *Current = Operand;
+    
+    while (InstsToReplaceByPhi.find(Current) != InstsToReplaceByPhi.end()) {
+        if (!Visited.insert(Current).second) {
+            // Cycle detected - this shouldn't happen now that preprossesPHIs2Print
+            // prevents cycles, but keep as safety. Use first visited as representative.
+            errs() << "WARNING: Cycle detected in InstsToReplaceByPhi at: " << *Current << "\n";
+            break;
+        }
+        Current = InstsToReplaceByPhi[Current];
+    }
+    
+    // Current is now the final replacement (or a cycle representative)
+    // Update Operand and continue with the rest of writeOperand
+    Operand = Current;
   }
+
+
 
   Instruction *inst = dyn_cast<Instruction>(Operand);
   if (inst && deleteAndReplaceInsts.find(inst) != deleteAndReplaceInsts.end()) {
@@ -5064,6 +5147,10 @@ void CWriter::generateHeader(Module &M) {
     if ((&*I)->getName().contains("cudaThreadSynchronize"))
       continue;
     if ((&*I)->getName().contains("cudaUnbindTexture"))
+      continue;
+    if ((&*I)->getName().contains("strcat"))
+      continue;
+    if ((&*I)->getName().contains("strcpy"))
       continue;
     // if((&*I)->getName().contains("xmalloc")) continue;
     //  Don't print declarations for intrinsic functions.
@@ -7808,6 +7895,7 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
     //  }
     //  Out << ";\n";
     //} else
+    if(isInlinableInst(*II)) errs() << *II << " is inlinable\n";
     if (!isInlinableInst(*II)) {
       errs() << "SUSAN: printing instruction " << *II << " at 6678\n";
       if (!isEmptyType(II->getType()) || isa<StoreInst>(&*II))
