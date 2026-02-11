@@ -214,9 +214,118 @@ bool CWriter::isInlinableInst(Instruction &I) const {
     }
   }
 
-  if (isa<LoadInst>(I) || isa<CmpInst>(I) || isa<GetElementPtrInst>(I) ||
-      isa<CastInst>(I))
+  if (isa<CmpInst>(I) || isa<GetElementPtrInst>(I) || isa<CastInst>(I))
     return true;
+
+  // Check if we can inline a LoadInst.
+  if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+
+    const DataLayout &DL = I.getModule()->getDataLayout();
+    Value *Ptr = LI->getPointerOperand();
+    Value *Underlying = GetUnderlyingObject(Ptr, DL);
+
+    // DEBUG: Trace inlining decisions
+    errs() << "CBE_DEBUG: Checking Load: " << *LI << "\n";
+    errs() << "CBE_DEBUG: Underlying Object: " << *Underlying << "\n";
+
+    // ANDREW: Only inline global variables unconditionally (e.g. constants, bounds).
+    // This allows clean code like "var = Global" instead of "tmp = Global; var = tmp".
+    // Also handle loads through global pointers (e.g., rowstr[j] where rowstr is
+    // stored in a global). In that case, GetUnderlyingObject returns the LoadInst
+    // that loaded the pointer from the global, not the global itself.
+    // ALSO: Handle Arguments that are known to be read-only structure arrays in the context
+    // of specific functions (like conj_grad).
+    bool isGlobalBased = false;
+    if (isa<GlobalVariable>(Underlying)) {
+      isGlobalBased = true;
+    } else if (LoadInst *UnderlyingLoad = dyn_cast<LoadInst>(Underlying)) {
+      // Check if the underlying load itself loads from a global variable.
+      Value *UnderlyingPtr = UnderlyingLoad->getPointerOperand();
+      const DataLayout &DL2 = I.getModule()->getDataLayout();
+      Value *DeepUnderlying = GetUnderlyingObject(UnderlyingPtr, DL2);
+      if (isa<GlobalVariable>(DeepUnderlying)) {
+        isGlobalBased = true;
+      }
+    } else if (Argument *Arg = dyn_cast<Argument>(Underlying)) {
+      // Check if the argument is ReadOnly (e.g. "int * restrict const rowstr").
+      // If the function promises not to write to it, we can treat it as safe to inline
+      // (assuming no aliasing issues that would break strict C semantics, which readonly implies).
+      if (Arg->onlyReadsMemory()) {
+         errs() << "CBE_DEBUG:   -> ReadOnly Argument, Allowlisting for INLINE.\n";
+         isGlobalBased = true;
+      }
+    }
+
+    if (isGlobalBased) {
+      if (LI->isVolatile()) {
+        errs() << "CBE_DEBUG:   -> Volatile Global, NOT inlining.\n";
+        return false;
+      }
+      errs() << "CBE_DEBUG:   -> Global Variable (or load through global ptr), INLINING.\n";
+      return true;
+    }
+
+    if (!I.hasOneUse()) {
+      errs() << "CBE_DEBUG:   -> Not Global and Multiple Uses, NOT inlining.\n";
+      return false;
+    }
+
+    // We can only inline the load if there are no instructions between the load
+    // and the use that could potentialy modify the memory location.
+    // We use AliasAnalysis to check this.
+    Instruction *User = cast<Instruction>(I.user_back());
+    if (User->getParent() != LI->getParent()) {
+       // If standard check fails, try AA-based "Invariant" check?
+       // If AA says no instruction in the function modifies this memory, it is effectively global/invariant.
+       // But checking "all instructions" is expensive.
+       // For now, respect strict block scope unless isGlobalBased found it.
+       // Actually, if AA proves that NO stores in the current function alias with this location,
+       // and NO calls modify it, then it IS invariant.
+       // But we only iterate between Load and Use here.
+       // Cross-block inlining requires LoopInvariantCodeMotion logic or similar.
+       // For rowstr in conj_grad, the use (phi) and load are in different blocks.
+       // So we MUST return TRUE from isGlobalBased logic to bypass this.
+       //
+       // Wait! If AA says it points to constant memory, we can treat it as GlobalBased!
+       if (AA && AA->pointsToConstantMemory(LI->getPointerOperand())) {
+          errs() << "CBE_DEBUG:   -> AA proves Constant Memory, INLINING (GlobalBased).\n";
+          return true; // Treat as global
+       }
+
+      errs() << "CBE_DEBUG:   -> Diff Parent Block, NOT inlining.\n";
+      return false;
+    }
+      
+    for (BasicBlock::iterator It = std::next(LI->getIterator()), E = User->getIterator();
+         It != E; ++It) {
+      // If we have AA, use it to check for ModRef.
+      if (AA) {
+        if (It->mayReadOrWriteMemory()) {
+           // Check if this instruction modifies the memory location of the load.
+           // ModRefInfo: Mod=Modify, Ref=Read, ModRef=Both, NoModRef=None.
+           // We only care if it MODIFIES (Mod or ModRef).
+           // If it only Reads, it doesn't clobber the load.
+           llvm::MemoryLocation Loc = llvm::MemoryLocation::get(LI);
+           if (isModSet(AA->getModRefInfo(&*It, Loc))) {
+              errs() << "CBE_DEBUG:   -> AA Clobber detected (Mod), NOT inlining. Inst: " << *It << "\n";
+              return false;
+           }
+        }
+      } else {
+        // Fallback to strict check
+        if (It->mayWriteToMemory()) {
+          errs() << "CBE_DEBUG:   -> Clobber detected (Write), NOT inlining.\n";
+          return false;
+        }
+        if (isa<CallInst>(&*It) || isa<InvokeInst>(&*It)) {
+           errs() << "CBE_DEBUG:   -> Clobber detected (Call), NOT inlining.\n";
+          return false;
+        }
+      }
+    }
+    errs() << "CBE_DEBUG:   -> Safe Local, INLINING.\n";
+    return true;
+  }
 
   //
   //  if(isa<BinaryOperator>(&I) && notInlinableBinOps.find(&I) ==
@@ -1052,6 +1161,18 @@ void CWriter::preprossesPHIs2Print(Function &F) {
         }
 
         if (Instruction *incomingInst = dyn_cast<Instruction>(phiVal)) {
+          // ANDREW: Skip coalescing for loop-carried PHI values where the 
+          // incoming instruction is computed inside the same loop.
+          // This prevents incorrect substitution like %div -> %kk.0 when
+          // %div is computed from %kk.0 inside the loop body.
+          Loop *phiLoop = LI->getLoopFor(phi->getParent());
+          Loop *incomingLoop = LI->getLoopFor(incomingInst->getParent());
+          if (phiLoop && incomingLoop && phiLoop == incomingLoop) {
+            errs() << "ANDREW: SKIPPING loop-carried coalescing: " << *incomingInst
+                   << " -> " << *replaceVal << "\n";
+            continue;  // Skip this - they need to be separate variables
+          }
+          
           if (deleteAndReplaceInsts.find(incomingInst) !=
               deleteAndReplaceInsts.end()) {
             Value *keyVal = deleteAndReplaceInsts[incomingInst];
@@ -1304,7 +1425,39 @@ LoopType CWriter::getLoopType(Loop* loop) {
     return doWhileLoop;
 
   BranchInst* brInst = dyn_cast<BranchInst>(entryBlock->getTerminator());
-  assert(brInst->isConditional() && "This is not the loop branch!!\n");
+  // Handle loop rotation patterns where header has unconditional branch
+  // This can indicate a while loop with continue statements (outer/inner pattern)
+  if (!brInst || !brInst->isConditional()) {
+    errs() << "ANDREW: Loop header has unconditional branch\n";
+    
+    // Check if this is a while-with-continue pattern:
+    // Header (while.cond.outer) has unconditional branch to condition block (while.cond)
+    // The condition block contains the actual loop condition
+    if (brInst && brInst->isUnconditional()) {
+      BasicBlock *condBlock = brInst->getSuccessor(0);
+      if (loop->contains(condBlock) && condBlock != latchBB) {
+        BranchInst *condBrInst = dyn_cast<BranchInst>(condBlock->getTerminator());
+        if (condBrInst && condBrInst->isConditional()) {
+          // Check if one successor exits the loop (the exit block or leads to it)
+          BasicBlock *succ0 = condBrInst->getSuccessor(0);
+          BasicBlock *succ1 = condBrInst->getSuccessor(1);
+          bool succ0ExitsLoop = !loop->contains(succ0) || succ0 == exitBB;
+          bool succ1ExitsLoop = !loop->contains(succ1) || succ1 == exitBB;
+          
+          if (succ0ExitsLoop || succ1ExitsLoop) {
+            errs() << "ANDREW: Detected whileLoopWithContinue pattern\n";
+            errs() << "  Header: " << entryBlock->getName() << "\n";
+            errs() << "  CondBlock: " << condBlock->getName() << "\n";
+            return whileLoopWithContinue;
+          }
+        }
+      }
+    }
+    
+    // Fallback to doWhileLoop
+    errs() << "ANDREW: treating as doWhileLoop\n";
+    return doWhileLoop;
+  }
 
   errs() << *brInst->getCondition() << "\n";
   CmpInst* cmp = dyn_cast<CmpInst>(brInst->getCondition());
@@ -1387,17 +1540,21 @@ void CWriter::preprocessLoopProfiles(Function &F) {
     if(lBr && lBr->isConditional()) {
       if(CmpInst* lCmp = dyn_cast<CmpInst>(lBr->getCondition())) {
         errs() << "Found lCmp: " << *lCmp << "\n";
-        errs() << "IV: " << *IV << "\n";
-        errs() << "Operands: " << *(lCmp->getOperand(0)) << " , "
-               << *(lCmp->getOperand(1)) << "\n";
-        if(lCmp->getOperand(0) == IV || lCmp->getOperand(1) == IV)
-            cmpWithIV = true;
-        else if(auto castOp0 = dyn_cast<CastInst>(lCmp->getOperand(0)))
-          if(castOp0->getOperand(0) == IV)
-            cmpWithIV = true;
-        else if(auto castOp1 = dyn_cast<CastInst>(lCmp->getOperand(1)))
-          if(castOp1->getOperand(0) == IV)
-            cmpWithIV = true;
+        if (IV) {
+          errs() << "IV: " << *IV << "\n";
+          errs() << "Operands: " << *(lCmp->getOperand(0)) << " , "
+                 << *(lCmp->getOperand(1)) << "\n";
+          if(lCmp->getOperand(0) == IV || lCmp->getOperand(1) == IV)
+              cmpWithIV = true;
+          else if(auto castOp0 = dyn_cast<CastInst>(lCmp->getOperand(0)))
+            if(castOp0->getOperand(0) == IV)
+              cmpWithIV = true;
+          else if(auto castOp1 = dyn_cast<CastInst>(lCmp->getOperand(1)))
+            if(castOp1->getOperand(0) == IV)
+              cmpWithIV = true;
+        } else {
+          errs() << "IV: null (while loop without induction variable)\n";
+        }
       }
     }
     // it should be enough to just check whether the exit condition is from IV
@@ -1568,6 +1725,10 @@ void CWriter::preprocessSkippableBranches(Function &F) {
         errs() << "Not a for loop\n";
         bool negateCondition;
         Instruction *condInst = findCondInst(LP->L, negateCondition);
+        if (!condInst) {
+          errs() << "condInst is null, skipping\n";
+          continue;
+        }
         errs() << *condInst << "\n";
         if(!isa<CmpInst>(condInst)) continue;
         Value *loopCondOpnd0 = condInst->getOperand(0);
@@ -3355,6 +3516,8 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
       return;
     }
     case Instruction::AddrSpaceCast: {
+      // Address spaces don't exist in C, just print the underlying operand
+      printConstant(CE->getOperand(0), Context);
       return;
     }
     default:
@@ -4233,12 +4396,7 @@ void CWriter::writeOperandWithCast(Value *Operand, unsigned Opcode,
 // Write the operand with a cast to another type based on the icmp predicate
 // being used.
 void CWriter::writeOperandWithCast(Value *Operand, ICmpInst &Cmp) {
-  // This has to do a cast to ensure the operand has the right signedness.
-  // Also, if the operand is a pointer, we make sure to cast to an integer when
-  // doing the comparison both for signedness and so that the C compiler doesn't
-  // optimize things like "p < NULL" to false (p may contain an integer value
-  // f.e.).
-  bool shouldCast = Cmp.isRelational();
+  bool shouldCast = needsCast(Operand, Cmp);
 
   // Write out the casted operand if we should, otherwise just write the
   // operand.
@@ -4260,6 +4418,28 @@ void CWriter::writeOperandWithCast(Value *Operand, ICmpInst &Cmp) {
   Out << ")";
   writeOperand(Operand);
   Out << ")";
+}
+
+bool CWriter::isCSigned(Value *V) const {
+  if (isa<ConstantInt>(V))
+    return true; // Constants are printed as signed integers in CBE
+  if (Instruction *I = dyn_cast<Instruction>(V)) {
+     if (isa<SExtInst>(I))
+       return true; // Explicit SExt is signed in C
+     if (isInlinableInst(*I))
+         return false; // Safely assume inlined ops might be unsigned -> force cast
+    return signedInsts.find(I) != signedInsts.end();
+  }
+  // Globals and Arguments are unsigned by default in CBE
+  return false;
+}
+
+bool CWriter::needsCast(Value *V, ICmpInst &I) const {
+  if (!I.isRelational())
+    return false;
+  if (V->getType()->isPointerTy())
+    return true;
+  return isCSigned(V) != I.isSigned();
 }
 
 static void defineConstantDoubleTy(raw_ostream &Out) {
@@ -7008,6 +7188,43 @@ void CWriter::printFunction(Function &F, bool inlineF) {
       }
     }
   }
+  // ANDREW: Propagate variable names to PHI nodes (specifically LCSSA)
+  for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+    if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
+      // Check if PHI already has a name
+      if (IR2vars.find(phi) != IR2vars.end() && !IR2vars[phi].empty())
+        continue;
+
+      std::string candidate = "";
+      bool consistent = true;
+      bool distinct = false;
+
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+        Value *inc = phi->getIncomingValue(i);
+        if (IR2vars.find(inc) != IR2vars.end() && !IR2vars[inc].empty()) {
+          std::string incName = *IR2vars[inc].begin(); // Pick first name
+          if (!distinct) {
+            candidate = incName;
+            distinct = true;
+          } else if (candidate != incName) {
+            consistent = false;
+            break;
+          }
+        }
+      }
+
+      if (distinct && consistent) {
+        errs() << "SUSAN: Propagating " << candidate << " to PHI " << *phi
+               << "\n";
+        IRNaming.insert(std::make_pair(phi, candidate));
+        IR2vars[phi].insert(candidate);
+        Var2IRs[candidate].insert(phi);
+        allVars.insert(candidate);
+        phiVars.insert(candidate);
+      }
+    }
+  }
+
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
       auto name = GetValueName(phi);
@@ -7437,9 +7654,11 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
   if (!(&*I)->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I)) {
     auto varName = GetValueName(&*I, true);
     if (canDeclareLocalLate(*I) && !isIVIncrement(I)) {
-      errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
-      printTypeName(Out, I->getType(), false) << ' ';
-      declaredLocals.insert(varName);
+      if (declaredLocals.find(varName) == declaredLocals.end()) {
+        errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
+        printTypeName(Out, I->getType(), false) << ' ';
+        declaredLocals.insert(varName);
+      }
     }
     Out << GetValueName(&*I) << " = ";
   }
@@ -7497,6 +7716,8 @@ Instruction *CWriter::findCondInst(Loop *L, bool &negateCondition) {
   Instruction *term = header->getTerminator();
   BranchInst *brInst = dyn_cast<BranchInst>(term);
   if(!brInst->isConditional()) {
+    // Fall back to latch for loops with unconditional header
+    errs() << "ANDREW: Header unconditional, checking latch for condition\n";
     auto latch = L->getLoopLatch();
     errs() << *latch << "\n";
     brInst = dyn_cast<BranchInst>(latch->getTerminator());
@@ -8890,29 +9111,9 @@ void CWriter::visitICmpInst(ICmpInst &I) {
   // so we use writeOperandWithCast here instead of writeOperand. Similarly
   // below for operand 1
 
-  Instruction *op0 = dyn_cast<Instruction>(I.getOperand(0));
-  Instruction *op1 = dyn_cast<Instruction>(I.getOperand(1));
-  if (I.isSigned()) {
-    if (!op0 || (op0 && signedInsts.find(op0) != signedInsts.end()))
-      writeOperand(I.getOperand(0));
-    else
-      writeOperandWithCast(I.getOperand(0), I);
-    printCmpOperator(&I);
-    if (!op1 || (op1 && signedInsts.find(op1) != signedInsts.end()))
-      writeOperand(I.getOperand(1));
-    else
-      writeOperandWithCast(I.getOperand(1), I);
-  } else {
-    if (!op0 || (op0 && signedInsts.find(op0) == signedInsts.end()))
-      writeOperand(I.getOperand(0));
-    else
-      writeOperandWithCast(I.getOperand(0), I);
-    printCmpOperator(&I);
-    if (!op1 || (op1 && signedInsts.find(op1) == signedInsts.end()))
-      writeOperand(I.getOperand(1));
-    else
-      writeOperandWithCast(I.getOperand(1), I);
-  }
+  writeOperandWithCast(I.getOperand(0), I);
+  printCmpOperator(&I);
+  writeOperandWithCast(I.getOperand(1), I);
   if (NeedsClosingParens)
     Out << "))";
 }
@@ -9607,6 +9808,7 @@ bool CWriter::RunAllAnalysis(Function &F) {
   DT = &getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
   RI = &getAnalysis<RegionInfoPass>(F).getRegionInfo();
   SE = &getAnalysis<ScalarEvolutionWrapperPass>(F).getSE();
+  AA = &getAnalysis<AAResultsWrapperPass>(F).getAAResults();
   // RI->dump();
   //  Get rid of intrinsics we can't handle.
   bool Modified = lowerIntrinsics(F);
@@ -9629,6 +9831,7 @@ bool CWriter::RunAllAnalysis(Function &F) {
   DT->recalculate(F);
   SE = &getAnalysis<ScalarEvolutionWrapperPass>(F).getSE();
   LI = &getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
+  AA = &getAnalysis<AAResultsWrapperPass>(F).getAAResults();
   // SUSAN: determine whether the function can be compiled without gotos
   std::set<BasicBlock *> visitedBBs;
   markIfBranches(F, &visitedBBs); // 2
@@ -10133,6 +10336,7 @@ void CWriter::visitCallInst(CallInst &I) {
     DT = &getAnalysis<DominatorTreeWrapperPass>(*F).getDomTree();
     RI = &getAnalysis<RegionInfoPass>(*F).getRegionInfo();
     SE = &getAnalysis<ScalarEvolutionWrapperPass>(*F).getSE();
+    AA = &getAnalysis<AAResultsWrapperPass>(*F).getAAResults();
     // toDeclareLocal = toDeclareLocal_s;
 
     Out << "}\n";

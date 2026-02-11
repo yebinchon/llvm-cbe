@@ -51,6 +51,7 @@ namespace llvm_cbe {
 enum LoopType {
   forLoop,
   whileLoop,
+  whileLoopWithContinue,  // while loop with continue statements (outer/inner pattern)
   doWhileLoop,
   unknown
 };
@@ -155,7 +156,10 @@ class LoopRegion : public CBERegion2{
 
   void printDoWhileLoop();
   void printWhileLoop();
+  void printWhileLoopWithContinue();
   void printForLoop();
+
+  BasicBlock *getConditionBlock() const { return conditionBlock; }
 
   private:
   Loop *loop;
@@ -163,6 +167,7 @@ class LoopRegion : public CBERegion2{
   std::vector<CBERegion2*>LoopBodyRegionDAG;
   std::set<BasicBlock*> remainingBBsToVisit;
   BasicBlock *latchBB;
+  BasicBlock *conditionBlock = nullptr;  // For whileLoopWithContinue: the inner condition block
   Value *ub, *lb, *incr;
   PHINode *IV;
   Instruction *IVInc;
@@ -219,6 +224,49 @@ class IfElseRegion : public CBERegion2 {
     return nullptr;
   }
 
+  // Check if a basic block is outside the parent loop (for break detection)
+  bool isExitingLoop(BasicBlock* bb) {
+    LoopRegion *lr = getParentLoopRegion();
+    if (!lr) return false;
+    Loop *L = lr->getLoop();
+    return !L->contains(bb);
+  }
+
+  // Check if a basic block branches back to the loop header/condition
+  // (for continue detection in while loops with continue)
+  bool isContinuingLoop(BasicBlock* bb) {
+    LoopRegion *lr = getParentLoopRegion();
+    if (!lr) return false;
+    Loop *L = lr->getLoop();
+    // Check if bb is inside the loop
+    if (!L->contains(bb)) return false;
+    // Check if bb branches to the header, latch, or condition block
+    BranchInst *br = dyn_cast<BranchInst>(bb->getTerminator());
+    if (!br) return false;
+    BasicBlock *header = L->getHeader();
+    BasicBlock *latch = L->getLoopLatch();
+    for (unsigned i = 0; i < br->getNumSuccessors(); i++) {
+      BasicBlock *succ = br->getSuccessor(i);
+      if (succ == header || succ == latch) return true;
+      // Also check if succ is a single-block that just branches to header/latch
+      // (e.g., while.cond.backedge -> while.cond)
+      if (L->contains(succ)) {
+        BranchInst *succBr = dyn_cast<BranchInst>(succ->getTerminator());
+        if (succBr && succBr->isUnconditional()) {
+          BasicBlock *target = succBr->getSuccessor(0);
+          if (target == header || target == latch) return true;
+          // Check one more level - condition block might be between
+          if (lr->getConditionBlock() && target == lr->getConditionBlock())
+            return true;
+        }
+      }
+      // Direct reference to condition block
+      if (lr->getConditionBlock() && succ == lr->getConditionBlock())
+        return true;
+    }
+    return false;
+  }
+
   bool noElseRegion(bool trueBranch) {
     std::set<BasicBlock *> branchBBs = trueBranch ? falseBBs : trueBBs;
     bool NoElseRegion = true;
@@ -243,6 +291,16 @@ class IfElseRegion : public CBERegion2 {
   BasicBlock* falseStartBB;
   std::set<BasicBlock*> trueBBs;
   std::set<BasicBlock*> falseBBs;
+  
+  // For loop break detection
+  bool isLoopBreak = false;
+  bool negateCond = false;
+  
+  // For loop continue detection
+  bool isLoopContinue = false;
+  
+  // For function return detection
+  bool isFunctionReturn = false;
 };
 
 }

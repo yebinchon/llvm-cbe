@@ -111,34 +111,116 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
   bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
   // Four possible control flows: both exit, only one exits
-  // Both exits is likely at the end of the program
+  // Both exits is likely at the end of the program - NOT an early return pattern
   if (exitFunctionTrueBr && exitFunctionFalseBr) {
-    errs() << "Both branches exit function!!\n";
+    errs() << "Both branches exit function!! (normal end-of-function if-else, not early return)\n";
+    // ANDREW: Fall through to normal if-else handling - this is NOT an early return
+    // This happens when we have code like:
+    //   if (cond) { x = 1; } else { x = 2; }
+    //   return;
+    // Both branches lead to the same return, but neither is an "early" return
   }
   // These are easier - the one that exits is an "early exit" and the fall-through continues the rest of the program.
   // Don't use the calculated postdominator!!
-  if (exitFunctionTrueBr) {
+  // ANDREW: Only trigger early return when ONE branch exits, not both
+  else if (exitFunctionTrueBr && !exitFunctionFalseBr) {
     errs() << "True branch exits function!!\n";
-    trueBrOnly = true; 
-    // currently only works if the exit is in the start BB
-    //trueBBs.insert(trueStartBB);
-    // Goes to return block
-    if (auto *lr = getParentLoopRegion())
-      for (auto *BB : falseBBs)
-        lr->removeBBToVisit(BB);
-    createSubIfElseRegions(trueStartBB, brBB, falseStartBB, false);
+    // ANDREW: Just emit return; statement, don't process subregions
+    isFunctionReturn = true;
+    negateCond = false;
     nextEntryBB = falseStartBB;
+    return;
   }
-  else if (exitFunctionFalseBr) {
+  else if (exitFunctionFalseBr && !exitFunctionTrueBr) {
     errs() << "False branch exits function!!\n";
-    falseBrOnly = true;
-    if (auto *lr = getParentLoopRegion())
-      for (auto *BB : trueBBs)
-        lr->removeBBToVisit(BB);
-    createSubIfElseRegions(falseStartBB, brBB, trueStartBB, true);
+    // ANDREW: Just emit return; statement, negate condition
+    isFunctionReturn = true;
+    negateCond = true;
     nextEntryBB = trueStartBB;
+    return;
   }
-  else {
+  // ANDREW: Check if either branch exits the parent loop (break statement)
+  else if (getParentLoopRegion()) {
+    bool exitLoopTrueBr = isExitingLoop(trueStartBB);
+    bool exitLoopFalseBr = isExitingLoop(falseStartBB);
+    
+    if (exitLoopTrueBr && !exitLoopFalseBr) {
+      errs() << "ANDREW: True branch exits loop (break)!\n";
+      isLoopBreak = true;
+      negateCond = false;
+      nextEntryBB = falseStartBB;
+      // Mark the exit block as visited so we don't process it
+      if (auto *lr = getParentLoopRegion()) {
+        lr->removeBBToVisit(trueStartBB);
+        
+        // ANDREW: If there are instructions between the branch and the loop exit (e.g. an inner loop),
+        // we must process them as subregions so they get printed before the break.
+        BasicBlock *loopExit = lr->getNextEntryBB();
+        if (trueStartBB != loopExit) {
+           // Create subregions for the Then branch until we hit the loop exit
+           errs() << "ANDREW: Generating subregions for non-trivial break block " << trueStartBB->getName() << "\n";
+           createSubIfElseRegions(trueStartBB, brBB, loopExit, false);
+        }
+      }
+      return;  // Don't create subregions (standard flow), will emit break in printRegionDAG
+    } else if (exitLoopFalseBr && !exitLoopTrueBr) {
+      errs() << "ANDREW: False branch exits loop (break)!\n";
+      isLoopBreak = true;
+      negateCond = true;  // Negate condition so we have if(!cond) break;
+      nextEntryBB = trueStartBB;
+      // Mark the exit block as visited so we don't process it
+      if (auto *lr = getParentLoopRegion()) {
+        lr->removeBBToVisit(falseStartBB);
+
+        // ANDREW: If there are instructions between the branch and the loop exit
+        BasicBlock *loopExit = lr->getNextEntryBB();
+        if (falseStartBB != loopExit) {
+           // Create subregions for the Else branch (stored in thenSubRegions because we negated condition)
+           errs() << "ANDREW: Generating subregions for non-trivial break block " << falseStartBB->getName() << "\n";
+           // Note: We use 'false' for isElseBranch because we are putting it in the "if (!cond)" block, which acts as the Then block
+           createSubIfElseRegions(falseStartBB, brBB, loopExit, false);
+        }
+      }
+      return;
+    }
+    
+    // ANDREW: Check if either branch continues the loop (continue statement)
+    bool continueLoopTrueBr = isContinuingLoop(trueStartBB);
+    bool continueLoopFalseBr = isContinuingLoop(falseStartBB);
+    
+    if (continueLoopTrueBr && !continueLoopFalseBr) {
+      errs() << "ANDREW: True branch continues loop (continue)!\n";
+      isLoopContinue = true;
+      negateCond = false;
+      nextEntryBB = falseStartBB;
+      // Mark the continue blocks as visited
+      if (auto *lr = getParentLoopRegion()) {
+        lr->removeBBToVisit(trueStartBB);
+        // Also remove backedge blocks that are just branches
+        BranchInst *tbr = dyn_cast<BranchInst>(trueStartBB->getTerminator());
+        if (tbr && tbr->isUnconditional()) {
+          lr->removeBBToVisit(tbr->getSuccessor(0));
+        }
+      }
+      return;
+    } else if (continueLoopFalseBr && !continueLoopTrueBr) {
+      errs() << "ANDREW: False branch continues loop (continue)!\n";
+      isLoopContinue = true;
+      negateCond = true;
+      nextEntryBB = trueStartBB;
+      if (auto *lr = getParentLoopRegion()) {
+        lr->removeBBToVisit(falseStartBB);
+        BranchInst *fbr = dyn_cast<BranchInst>(falseStartBB->getTerminator());
+        if (fbr && fbr->isUnconditional()) {
+          lr->removeBBToVisit(fbr->getSuccessor(0));
+        }
+      }
+      return;
+    }
+    // Fall through to normal if-else handling
+  }
+  // Normal if-else handling
+  {
 
   for (auto &BB : *(brBB->getParent())) {
     if (DT->dominates(trueStartBB, &BB) && PDT->dominates(pdBB, &BB) &&
@@ -231,13 +313,24 @@ void LoopRegion::createCBERegionDAG(BasicBlock *entryBB) {
       return;
 
     nextRegionEntryBB = entryR->getNextEntryBB();
-    if (!nextRegionEntryBB)
+    if (!nextRegionEntryBB) {
       errs() << "Did not detect nextRegion\n";
-    if (nextRegionEntryBB) {
-      errs() << "SUSAN: nextRegionEntryBB " << nextRegionEntryBB->getName();
-      errs() << " for region: " << *(this->loop) << "\n";
-      // createCBERegionDAG(nextRegionEntryBB);
+      break;
     }
+    
+    // Stop if next block is outside the loop or is the latch (already handled separately)
+    if (nextRegionEntryBB == latchBB) {
+      errs() << "ANDREW: nextRegionEntryBB is latch, stopping loop body traversal\n";
+      break;
+    }
+    if (!loop->contains(nextRegionEntryBB)) {
+      errs() << "ANDREW: nextRegionEntryBB " << nextRegionEntryBB->getName() 
+             << " is outside loop, stopping traversal\n";
+      break;
+    }
+    
+    errs() << "SUSAN: nextRegionEntryBB " << nextRegionEntryBB->getName();
+    errs() << " for region: " << *(this->loop) << "\n";
   }
 }
 
@@ -305,6 +398,85 @@ void LinearRegion::printRegionDAG() {
 }
 
 void IfElseRegion::printRegionDAG() {
+  // ANDREW: Handle loop break statements specially
+  if (isLoopBreak) {
+    auto condInst = brInst->getCondition();
+    // print instructions before the branch
+    for (auto &I : *brBB) {
+      if (&I == condInst) break;
+      if (cw->isSkipableInst(&I)) continue;
+      cw->printInstruction(&I);
+    }
+    
+    cw->Out << "  if (";
+    if (negateCond) cw->Out << "!(";
+    cw->writeOperand(condInst, cw->ContextCasted);
+    if (negateCond) cw->Out << ")";
+    cw->Out << ") {\n";
+    
+    // ANDREW: Print logic inside the break block (e.g. inner loops)
+    for (auto R : thenSubRegions)
+      R->printRegionDAG();
+      
+    cw->Out << "  break;\n";
+    cw->Out << "  }\n";
+    return;
+  }
+
+  // ANDREW: Handle loop continue statements specially
+  if (isLoopContinue) {
+    auto condInst = brInst->getCondition();
+    // print instructions before the branch
+    for (auto &I : *brBB) {
+      if (&I == condInst) break;
+      if (cw->isSkipableInst(&I)) continue;
+      cw->printInstruction(&I);
+    }
+    
+    cw->Out << "  if (";
+    if (negateCond) cw->Out << "!(";
+    cw->writeOperand(condInst, cw->ContextCasted);
+    if (negateCond) cw->Out << ")";
+    cw->Out << ") {\n";
+    cw->Out << "  continue;\n";
+    cw->Out << "  }\n";
+    return;
+  }
+
+  // ANDREW: Handle function return statements specially  
+  if (isFunctionReturn) {
+    auto condInst = brInst->getCondition();
+    // print instructions before the branch
+    for (auto &I : *brBB) {
+      if (&I == condInst) break;
+      if (cw->isSkipableInst(&I)) continue;
+      cw->printInstruction(&I);
+    }
+    
+    cw->Out << "  if (";
+    if (negateCond) cw->Out << "!(";
+    cw->writeOperand(condInst, cw->ContextCasted);
+    if (negateCond) cw->Out << ")";
+    cw->Out << ") {\n";
+    // Handle return type properly - emit appropriate return value
+    Function *F = brBB->getParent();
+    Type *retTy = F->getReturnType();
+    if (retTy->isVoidTy()) {
+      cw->Out << "  return;\n";
+    } else if (retTy->isIntegerTy()) {
+      cw->Out << "  return 0;\n";
+    } else if (retTy->isFloatingPointTy()) {
+      cw->Out << "  return 0.0;\n";
+    } else if (retTy->isPointerTy()) {
+      cw->Out << "  return NULL;\n";
+    } else {
+      // Fallback for other types
+      cw->Out << "  return;\n";
+    }
+    cw->Out << "  }\n";
+    return;
+  }
+
   if (!this->parentRegion || this->parentRegion->isaLinearRegion()) {
     auto FuncName = demangleFunctionName(this->entryBlock->getParent()->getName());
     cw->Out << "// INSERT COMMENT IFELSE: " << FuncName << "::" << this->entryBlock->getName() << "\n";
@@ -365,8 +537,15 @@ void LoopRegion::printRegionDAG() {
       errs() << "Print whileLoop " << loop->getName() << "...\n";
       printWhileLoop();
       return;
+    case whileLoopWithContinue:
+      errs() << "Print whileLoopWithContinue " << loop->getName() << "...\n";
+      printWhileLoopWithContinue();
+      return;
     case forLoop:
       errs() << "Print forLoop " << loop->getName() << "...\n";
+      break;
+    case unknown:
+      errs() << "Print unknown loop type " << loop->getName() << "...\n";
       break;
   }
 
@@ -465,15 +644,17 @@ void LoopRegion::printRegionDAG() {
   // exit condition
   // Use writeOperandInternal instead of GetValueName to properly handle
   // conversion instructions and get the correct variable name
-  cw->writeOperandInternal(condInst->getOperand(0));
   if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
+    cw->writeOperandWithCast(condInst->getOperand(0), *icmp);
     if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
       cw->Out << " < ";
     else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
       cw->Out << " < ";
     else
       cw->printCmpOperator(icmp, negateCondition);
+    cw->writeOperandWithCast(condInst->getOperand(1), *icmp);
   } else if (FCmpInst *fcmp = dyn_cast<FCmpInst>(condInst)) {
+    cw->writeOperandInternal(condInst->getOperand(0));
     // Handle float comparisons
     CmpInst::Predicate pred = fcmp->getPredicate();
     if (negateCondition) {
@@ -504,8 +685,8 @@ void LoopRegion::printRegionDAG() {
       default:
         llvm_unreachable("Unhandled FCmpInst predicate in loop condition");
     }
+    cw->writeOperandInternal(condInst->getOperand(1));
   }
-  cw->writeOperandInternal(condInst->getOperand(1));
   cw->Out << "; ";
 
   // increment
@@ -523,6 +704,39 @@ void LoopRegion::printRegionDAG() {
     if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
       cw->printInstruction(&I);
   }
+  
+
+  // ANDREW: Emit PHI node updates for loop-carried variables (other than IV)
+  // This handles cases like: kk = ik; at the end of each iteration
+  // Note: header is already declared above
+  for (auto &I : *header) {
+    if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+      // Skip the induction variable, it's handled by the for() update
+      if (phi == IV) continue;
+      
+      // Find the value coming from inside the loop (not the initial value)
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomingBB = phi->getIncomingBlock(i);
+        if (loop->contains(incomingBB)) {
+          Value *incomingVal = phi->getIncomingValue(i);
+          // Skip self-assignments (when incoming value resolves to same name as PHI)
+          std::string phiName = cw->GetValueName(phi);
+          std::string incomingName = cw->GetValueName(incomingVal);
+          if (phiName == incomingName) {
+            errs() << "ANDREW: Skipping self-assignment for PHI: " << *phi << "\n";
+            break;
+          }
+          // Emit: phi_name = incoming_value;
+          // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
+          cw->Out << "  " << phiName << " = ";
+          cw->writeOperandInternal(incomingVal);
+          cw->Out << ";\n";
+          errs() << "ANDREW: Emitting PHI update: " << *phi << " = " << *incomingVal << "\n";
+          break;
+        }
+      }
+    }
+  }
 
   cw->Out << "}\n";
 }
@@ -535,6 +749,18 @@ void LoopRegion::printDoWhileLoop() {
   BasicBlock *header = loop->getHeader();
   bool negateCondition = false;
   Instruction *condInst = cw->findCondInst(loop, negateCondition);
+  
+  // Handle case where we can't find a condition instruction
+  if (!condInst) {
+    errs() << "Warning: condInst is null in printDoWhileLoop, emitting simple loop\n";
+    cw->Out << "do {\n";
+    cw->printBasicBlock(loop->getHeader());
+    for (auto R : LoopBodyRegionDAG)
+      R->printRegionDAG();
+    cw->Out << "} while(1); // TODO: fix loop condition\n";
+    return;
+  }
+  
   errs() << *condInst << "\n";
 
   std::set<Instruction *> printedLiveins;
@@ -570,34 +796,164 @@ void LoopRegion::printDoWhileLoop() {
   //    cw->printInstruction(&I);
   //}
 
+  // Emit PHI node updates for loop-carried variables
+  // This handles cases like: count = count + 1; at the end of each iteration
+  for (auto &I : *header) {
+    if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+      // Find the value coming from inside the loop (not the initial value)
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomingBB = phi->getIncomingBlock(i);
+        if (loop->contains(incomingBB)) {
+          Value *incomingVal = phi->getIncomingValue(i);
+          // Don't emit self-assignments (phi = phi)
+          if (incomingVal == phi) continue;
+          // Skip self-assignments (when incoming value resolves to same name as PHI)
+          std::string phiName = cw->GetValueName(phi);
+          std::string incomingName = cw->GetValueName(incomingVal);
+          if (phiName == incomingName) {
+            errs() << "ANDREW: Skipping self-assignment for do-while PHI: " << *phi << "\n";
+            break;
+          }
+          
+          // Emit: phi_name = incoming_expression;
+          cw->Out << "  " << cw->GetValueName(phi) << " = ";
+          
+          // If the incoming value is a BinaryOperator (add, sub, etc.),
+          // expand it inline instead of using a potentially FIXME variable name
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            // Write: op0 OPERATOR op1
+            cw->writeOperandInternal(binOp->getOperand(0));
+            switch (binOp->getOpcode()) {
+              case Instruction::Add: cw->Out << " + "; break;
+              case Instruction::Sub: cw->Out << " - "; break;
+              case Instruction::Mul: cw->Out << " * "; break;
+              case Instruction::UDiv:
+              case Instruction::SDiv: cw->Out << " / "; break;
+              case Instruction::URem:
+              case Instruction::SRem: cw->Out << " % "; break;
+              default: cw->Out << " /* unknown op */ "; break;
+            }
+            cw->writeOperandInternal(binOp->getOperand(1));
+            errs() << "ANDREW: Expanded BinaryOp for PHI update: " << *binOp << "\n";
+          } else {
+            // For non-BinaryOperator, use standard operand writing
+            cw->writeOperandInternal(incomingVal);
+          }
+          
+          cw->Out << ";\n";
+          errs() << "ANDREW: Emitting do-while PHI update: " << *phi << " = " << *incomingVal << "\n";
+          break;
+        }
+      }
+    }
+  }
+
   cw->Out << "} while(";
+
+  // Helper lambda to write operand, checking if it should be replaced by a PHI name
+  auto writeOperandOrPHI = [&](Value *op, ICmpInst *icmp = nullptr) {
+    bool emitCast = icmp && cw->needsCast(op, *icmp);
+    if (emitCast) {
+      Type *OpTy = op->getType();
+      if (OpTy->isPointerTy())
+        OpTy = cw->TD->getIntPtrType(op->getContext());
+      cw->Out << "((";
+      cw->printSimpleType(cw->Out, OpTy, icmp->isSigned());
+      cw->Out << ")";
+    }
+    // Check if this operand is the incoming value to a PHI node in the header
+    for (auto &I : *header) {
+      if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+          BasicBlock *incomingBB = phi->getIncomingBlock(i);
+          if (loop->contains(incomingBB) && phi->getIncomingValue(i) == op) {
+            // This operand feeds into a PHI node - use the PHI name instead
+            cw->Out << cw->GetValueName(phi);
+            if (emitCast)
+              cw->Out << ")";
+            return;
+          }
+        }
+      }
+    }
+    // Not a PHI incoming value, write normally
+    cw->writeOperandInternal(op);
+    if (emitCast)
+      cw->Out << ")";
+  };
 
   //exit condition
   CmpInst *cmp = dyn_cast<CmpInst>(condInst);
   // not the result of a comparison; single value
   if(!cmp)
     cw->writeOperand(condInst, cw->ContextCasted);
-  //cw->Out << cw->GetValueName(condInst->getOperand(0));
-  //if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
-  //  if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
-  //    cw->Out << " < ";
-  //  else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
-  //    cw->Out << " < ";
-  //  else
-  //    cw->printCmpOperator(icmp, negateCondition);
-  //}
-  //cw->writeOperandInternal(condInst->getOperand(1));
+  else {
+    // Handle comparison instructions (e.g., nn1 < n)
+    ICmpInst *icmp = dyn_cast<ICmpInst>(condInst);
+    writeOperandOrPHI(condInst->getOperand(0), icmp);
+    if (icmp) {
+      if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
+        cw->Out << " < ";
+      else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
+        cw->Out << " < ";
+      else
+        cw->printCmpOperator(icmp, negateCondition);
+    } else if (FCmpInst *fcmp = dyn_cast<FCmpInst>(condInst)) {
+      // Handle float comparisons
+      CmpInst::Predicate pred = fcmp->getPredicate();
+      if (negateCondition) {
+        switch (pred) {
+          case FCmpInst::FCMP_OEQ: pred = FCmpInst::FCMP_ONE; break;
+          case FCmpInst::FCMP_ONE: pred = FCmpInst::FCMP_OEQ; break;
+          case FCmpInst::FCMP_OGT: pred = FCmpInst::FCMP_OLE; break;
+          case FCmpInst::FCMP_OGE: pred = FCmpInst::FCMP_OLT; break;
+          case FCmpInst::FCMP_OLT: pred = FCmpInst::FCMP_OGE; break;
+          case FCmpInst::FCMP_OLE: pred = FCmpInst::FCMP_OGT; break;
+          default: break;
+        }
+      }
+      switch (pred) {
+        case FCmpInst::FCMP_OEQ: cw->Out << " == "; break;
+        case FCmpInst::FCMP_ONE: cw->Out << " != "; break;
+        case FCmpInst::FCMP_OGT: cw->Out << " > "; break;
+        case FCmpInst::FCMP_OGE: cw->Out << " >= "; break;
+        case FCmpInst::FCMP_OLT: cw->Out << " < "; break;
+        case FCmpInst::FCMP_OLE: cw->Out << " <= "; break;
+        case FCmpInst::FCMP_UEQ: cw->Out << " == "; break;
+        case FCmpInst::FCMP_UNE: cw->Out << " != "; break;
+        case FCmpInst::FCMP_UGT: cw->Out << " > "; break;
+        case FCmpInst::FCMP_UGE: cw->Out << " >= "; break;
+        case FCmpInst::FCMP_ULT: cw->Out << " < "; break;
+        case FCmpInst::FCMP_ULE: cw->Out << " <= "; break;
+        default:
+          llvm_unreachable("Unhandled FCmpInst predicate in do-while loop condition");
+      }
+    }
+    writeOperandOrPHI(condInst->getOperand(1), icmp);
+  }
 
   cw->Out << ");\n";
 }
 
 // FIXME: add print for while loop
 void LoopRegion::printWhileLoop() {
-  errs() << "PRINTING DOWHILE\n";
+  errs() << "ANDREW PRINTING WHILE\n";
 
   BasicBlock *header = loop->getHeader();
   bool negateCondition = false;
   Instruction *condInst = cw->findCondInst(loop, negateCondition);
+  
+  // Handle case where we can't find a condition instruction
+  if (!condInst) {
+    errs() << "Warning: condInst is null in printWhileLoop, emitting simple loop\n";
+    cw->Out << "while(1) { // TODO: fix loop condition\n";
+    cw->printBasicBlock(loop->getHeader());
+    for (auto R : LoopBodyRegionDAG)
+      R->printRegionDAG();
+    cw->Out << "}\n";
+    return;
+  }
+  
   errs() << *condInst << "\n";
 
   std::set<Instruction *> printedLiveins;
@@ -626,16 +982,20 @@ void LoopRegion::printWhileLoop() {
   if(!cmp)
     cw->writeOperand(condInst, cw->ContextCasted);
   else {
-    cw->Out << cw->GetValueName(condInst->getOperand(0));
     if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
+      cw->writeOperandWithCast(condInst->getOperand(0), *icmp);
       if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
         cw->Out << " < ";
       else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
         cw->Out << " < ";
       else
         cw->printCmpOperator(icmp, negateCondition);
+      cw->writeOperandWithCast(condInst->getOperand(1), *icmp);
+    } else {
+      cw->writeOperandInternal(condInst->getOperand(0));
+      // fcmp not handled here, potentially buggy for float while loops
+      cw->writeOperandInternal(condInst->getOperand(1));
     }
-    cw->writeOperandInternal(condInst->getOperand(1));
   }
   cw->Out << ") {\n";
 
@@ -645,13 +1005,196 @@ void LoopRegion::printWhileLoop() {
   }
 
   // print extra instructions in a latch other than incr and br
-  //errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
-  //for (auto &I : *latchBB) {
-  //  errs() << "CBERegion: I 316: " << I << "\n";
-  //  if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
-  //    cw->printInstruction(&I);
-  //}
+  errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
+  for (auto &I : *latchBB) {
+    errs() << "CBERegion: I 316: " << I << "\n";
+    if ((cw->isIVIncrement(&I)) && latchBB->getTerminator() != &I)
+      cw->printInstruction(&I);
+  }
 
+  // Emit PHI node updates for loop-carried variables (other than IV)
+  // This handles cases like: kk = ik; at the end of each iteration
+  // Note: header is already declared above
+  for (auto &I : *header) {
+    if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+      
+      // Find the value coming from inside the loop (not the initial value)
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomingBB = phi->getIncomingBlock(i);
+        if (loop->contains(incomingBB)) {
+          Value *incomingVal = phi->getIncomingValue(i);
+          // Skip self-assignments (when incoming value resolves to same name as PHI)
+          std::string phiName = cw->GetValueName(phi);
+          std::string incomingName = cw->GetValueName(incomingVal);
+          if (phiName == incomingName) {
+            errs() << "ANDREW: Skipping self-assignment for while PHI: " << *phi << "\n";
+            break;
+          }
+          // Emit: phi_name = incoming_value;
+          // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
+          cw->Out << "  " << phiName << " = ";
+          cw->writeOperandInternal(incomingVal);
+          cw->Out << ";\n";
+          errs() << "ANDREW: Emitting PHI update: " << *phi << " = " << *incomingVal << "\n";
+          break;
+        }
+      }
+    }
+  }
+
+  cw->Out << "}\n";
+}
+
+void LoopRegion::printWhileLoopWithContinue() {
+  errs() << "ANDREW:PRINTING WHILE WITH CONTINUE\n";
+  
+  BasicBlock *header = loop->getHeader();
+  
+  // For whileLoopWithContinue, the header has an unconditional branch to the condition block
+  BranchInst *headerBr = dyn_cast<BranchInst>(header->getTerminator());
+  if (!headerBr || headerBr->isConditional()) {
+    errs() << "ERROR: Expected unconditional branch in whileLoopWithContinue header\n";
+    printWhileLoop();
+    return;
+  }
+  
+  BasicBlock *condBlock = headerBr->getSuccessor(0);
+  errs() << "ANDREW: condBlock is " << condBlock->getName() << "\n";
+  
+  // Get the condition from the condBlock
+  BranchInst *condBr = dyn_cast<BranchInst>(condBlock->getTerminator());
+  if (!condBr || !condBr->isConditional()) {
+    errs() << "ERROR: Expected conditional branch in condition block\n";
+    printWhileLoop();
+    return;
+  }
+  
+  // Find the condition instruction and operands
+  Value *condValue = condBr->getCondition();
+  CmpInst *condInst = dyn_cast<CmpInst>(condValue);
+  
+  // Determine which successor is the body and which is the exit
+  BasicBlock *bodySucc = nullptr;
+  BasicBlock *exitSucc = nullptr;
+  bool negateCondition = false;
+  
+  BasicBlock *succ0 = condBr->getSuccessor(0);
+  BasicBlock *succ1 = condBr->getSuccessor(1);
+  
+  if (!loop->contains(succ0)) {
+    exitSucc = succ0;
+    bodySucc = succ1;
+    negateCondition = true;  // Branch to exit on true, so negate for while condition
+  } else if (!loop->contains(succ1)) {
+    exitSucc = succ1;
+    bodySucc = succ0;
+    negateCondition = false;  // Branch to body on true
+  } else {
+    if (succ0 == nextEntryBB) {
+      exitSucc = succ0;
+      bodySucc = succ1;
+      negateCondition = true;
+    } else {
+      exitSucc = succ1;
+      bodySucc = succ0;
+      negateCondition = false;
+    }
+  }
+  
+  errs() << "ANDREW: bodySucc=" << bodySucc->getName() 
+         << ", exitSucc=" << (exitSucc ? exitSucc->getName() : "null")
+         << ", negate=" << negateCondition << "\n";
+  
+  // Print PHI node initializations from header (from loop preheader)
+  for (auto &I : *header) {
+    if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+      // Find incoming value from outside the loop
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomingBB = phi->getIncomingBlock(i);
+        if (!loop->contains(incomingBB)) {
+          Value *initVal = phi->getIncomingValue(i);
+          cw->Out << "  " << cw->GetValueName(phi) << " = ";
+          if (ConstantInt *CI = dyn_cast<ConstantInt>(initVal)) {
+            cw->Out << CI->getSExtValue();
+          } else {
+            cw->writeOperandInternal(initVal);
+          }
+          cw->Out << ";\n";
+          break;
+        }
+      }
+    }
+  }
+  
+  // Print while condition using condBlock's condition
+  cw->Out << "// INSERT COMMENT LOOP: " << header->getParent()->getName() 
+          << "::" << loop->getName() << "\n";
+  cw->Out << "while (";
+  if (condInst) {
+    if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
+      // Get the proper variable name for the loop condition
+      Value *op0 = condInst->getOperand(0);
+      // If op0 is a PHI from condBlock, use the proper name
+      cw->Out << cw->GetValueName(op0);
+      cw->printCmpOperator(icmp, negateCondition);
+      cw->writeOperandInternal(condInst->getOperand(1));
+    } else {
+      cw->writeOperand(condInst, cw->ContextCasted);
+    }
+  } else {
+    cw->writeOperand(condValue, cw->ContextCasted);
+  }
+  cw->Out << ") {\n";
+  
+  // Print loop body using the child regions (same approach as for loops)
+  // LoopBodyRegionDAG was populated by createCBERegionDAG(startBB) in the constructor
+  // The child regions already contain the full control flow including:
+  // - if-else structures for continue checks
+  // - nested loops
+  // - function calls
+  // - all other statements
+  errs() << "ANDREW: Printing LoopBodyRegionDAG with " << LoopBodyRegionDAG.size() << " regions\n";
+  for (auto R : LoopBodyRegionDAG)
+    R->printRegionDAG();
+  
+  // print extra instructions in a latch other than incr and br
+  errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
+  for (auto &I : *latchBB) {
+    errs() << "CBERegion: I 316: " << I << "\n";
+    if ((cw->isIVIncrement(&I)) && latchBB->getTerminator() != &I)
+      cw->printInstruction(&I);
+  }
+
+  // Emit PHI node updates for loop-carried variables (other than IV)
+  // This handles cases like: kk = ik; at the end of each iteration
+  // Note: header is already declared above
+  for (auto &I : *header) {
+    if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+      
+      // Find the value coming from inside the loop (not the initial value)
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomingBB = phi->getIncomingBlock(i);
+        if (loop->contains(incomingBB)) {
+          Value *incomingVal = phi->getIncomingValue(i);
+          // Skip self-assignments (when incoming value resolves to same name as PHI)
+          std::string phiName = cw->GetValueName(phi);
+          std::string incomingName = cw->GetValueName(incomingVal);
+          if (phiName == incomingName) {
+            errs() << "ANDREW: Skipping self-assignment for whileWithContinue PHI: " << *phi << "\n";
+            break;
+          }
+          // Emit: phi_name = incoming_value;
+          // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
+          cw->Out << "  " << phiName << " = ";
+          cw->writeOperandInternal(incomingVal);
+          cw->Out << ";\n";
+          errs() << "ANDREW: Emitting PHI update: " << *phi << " = " << *incomingVal << "\n";
+          break;
+        }
+      }
+    }
+  }
+  
   cw->Out << "}\n";
 }
 
@@ -682,11 +1225,16 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
   assert(loop && "cannot find loop for a loop region\n");
 
   latchBB = loop->getLoopLatch();
+  if (latchBB)
+    errs() << "ANDREW: latchBB is " << latchBB->getName() << "\n";
+  else
+    errs() << "ANDREW: latchBB is NULL (loop has multiple latches)\n";
   errs() << "YEBIN For Loop " << loop->getHeader()->getParent()->getName()
          << "::" << loop->getName() << "\n";
   this->loopType = cw->getLoopType(loop);
   errs() << "YEBIN: LOOP TYPE " << loopType << "\n";
   this->nestlevel = LI->getLoopDepth(entryBB);
+  conditionBlock = nullptr;  // Initialize, will be set for whileLoopWithContinue
 
   nextEntryBB = cw->getSingleExitBlock(loop);
   errs() << "Unique Exit Block " << nextEntryBB->getName() << "\n";
@@ -699,9 +1247,53 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
   switch(this->loopType) {
     case doWhileLoop:
       errs() << "Found doWhileLoop " << loop->getName() << "\n";
-      startBB = entryBB->getUniqueSuccessor();
-      assert(startBB && "Cannot find unique sucessor of header!\n");
+      // For do-while loops, the header contains the first part of the body.
+      // The header is printed separately in printDoWhileLoop, so startBB
+      // should be the first successor of the header that needs region analysis.
+      // Handle both conditional and unconditional branches at the header.
+      if (BranchInst *BI = dyn_cast<BranchInst>(entryBB->getTerminator())) {
+        if (BI->isUnconditional()) {
+          startBB = BI->getSuccessor(0);
+        } else {
+          // Conditional branch - pick first successor that's in the loop and not latch
+          succ0 = BI->getSuccessor(0);
+          succ1 = BI->getSuccessor(1);
+          if (loop->contains(succ0) && succ0 != latchBB)
+            startBB = succ0;
+          else if (loop->contains(succ1) && succ1 != latchBB)
+            startBB = succ1;
+          else
+            startBB = entryBB; // fallback - header is the body
+        }
+      } else {
+        startBB = entryBB; // No branch - unusual, use header
+      }
+      errs() << "DoWhile StartBB: " << startBB->getName() << "\n";
       break;
+    case whileLoopWithContinue: {
+      errs() << "Found whileLoopWithContinue " << loop->getName() << "\n";
+      // Header has unconditional branch to condition block
+      BranchInst *hBr = dyn_cast<BranchInst>(entryBB->getTerminator());
+      BasicBlock *condBlock = hBr->getSuccessor(0);
+      conditionBlock = condBlock;  // Store for later exclusion from body regions
+      BranchInst *condBr = dyn_cast<BranchInst>(condBlock->getTerminator());
+      
+      // Find body successor (the one that stays in the loop)
+      succ0 = condBr->getSuccessor(0);
+      succ1 = condBr->getSuccessor(1);
+      if (!loop->contains(succ0)) {
+        startBB = succ1;  // succ0 exits, succ1 is body
+      } else if (!loop->contains(succ1)) {
+        startBB = succ0;  // succ1 exits, succ0 is body
+      } else if (succ0 == nextEntryBB) {
+        startBB = succ1;
+      } else {
+        startBB = succ0;
+      }
+      errs() << "WhileWithContinue StartBB: " << startBB->getName() << "\n";
+      errs() << "WhileWithContinue ConditionBlock: " << conditionBlock->getName() << "\n";
+      break;
+    }
     case whileLoop:
       errs() << "Found whileLoop " << loop->getName() << "\n";
       //TODO: deal with while loops
@@ -747,7 +1339,9 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
   for (auto BB : loopBBs) {
     if (lr)
       lr->removeBBToVisit(BB);
-    if (BB != entryBB && BB != latchBB)
+    // For whileLoopWithContinue, exclude the conditionBlock to prevent
+    // it from being processed as a nested inner loop
+    if (BB != entryBB && BB != latchBB && BB != conditionBlock)
       addBBToVisit(BB);
   }
 
@@ -768,6 +1362,13 @@ CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
       // If the entryBB is the header of an ancestor loop region, stop traversal.
       if (LR->getLoop()->getHeader() == entryBB) {
         errs() << "ANDREW: CBERegion: detected backedge to header of loop " << entryBB->getName() << ", stopping traversal\n";
+        return nullptr;
+      }
+      
+      // ANDREW: Also check if entryBB is the condition block of a whileLoopWithContinue
+      // This prevents re-processing the condition block as a nested loop
+      if (LR->getConditionBlock() && LR->getConditionBlock() == entryBB) {
+        errs() << "ANDREW: CBERegion: detected backedge to condition block " << entryBB->getName() << ", stopping traversal\n";
         return nullptr;
       }
     }

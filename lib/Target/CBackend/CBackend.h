@@ -8,6 +8,7 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Support/raw_ostream.h"
 #include <fstream>
 #include <unordered_set>
@@ -136,6 +137,11 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   LoopType getLoopType(Loop* L);
 
 
+  raw_ostream &printSimpleType(raw_ostream &Out, Type *Ty, bool isSigned);
+  const DataLayout *TD = nullptr;
+  bool isCSigned(Value *V) const;
+  bool needsCast(Value *V, ICmpInst &I) const;
+
   private:
   //SUSAN: counters
   int cnt_totalVariables;
@@ -217,6 +223,7 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   DominatorTree *DT = nullptr;
   RegionInfo *RI = nullptr;
   ScalarEvolution *SE = nullptr;
+  AliasAnalysis *AA = nullptr;
 
   std::string _Out;
   std::string _OutHeaders;
@@ -229,7 +236,6 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   const MCRegisterInfo *MRI = nullptr;
   const MCObjectFileInfo *MOFI = nullptr;
   MCContext *TCtx = nullptr;
-  const DataLayout *TD = nullptr;
   const Instruction *CurInstr = nullptr;
   const Loop *CurLoop = nullptr;
 
@@ -345,6 +351,7 @@ public:
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<RegionInfoPass>();
     AU.addRequired<ScalarEvolutionWrapperPass>();
+    AU.addRequired<AAResultsWrapperPass>();
     AU.setPreservesCFG();
   }
 
@@ -389,7 +396,6 @@ private:
                                                 bool isSigned = false);
   raw_ostream &printTypeNameUnaligned(raw_ostream &Out, Type *Ty,
                                       bool isSigned = false);
-  raw_ostream &printSimpleType(raw_ostream &Out, Type *Ty, bool isSigned);
 
   std::string getStructName(StructType *ST);
   std::string getFieldName(StructType *ST);
