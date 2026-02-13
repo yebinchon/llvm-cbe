@@ -197,6 +197,13 @@ bool CWriter::isAddressExposed(Value *V) const {
 // what is acceptable to inline, so that variable declarations don't get
 // printed and an extra copy of the expr is not emitted.
 bool CWriter::isInlinableInst(Instruction &I) const {
+  // If the instruction is used by a PHI node, we cannot inline it because
+  // the PHI node expects a defined variable in the predecessor block.
+  // for (const User *U : I.users()) {
+  //   if (isa<PHINode>(U))
+  //     return false;
+  // }
+
   // Always inline cmp instructions, even if they are shared by multiple
   // expressions.  GCC generates horrible code if we don't.
   //
@@ -521,7 +528,7 @@ void CWriter::CountTimes2bePrintedByRegionPath() {
     for (auto subRegion : currRegion->thenSubRegions)
       toVisit.push(subRegion);
     for (auto subRegion : currRegion->elseSubRegions)
-      toVisit.push(subRegion);
+    toVisit.push(subRegion);
   }
 }
 
@@ -679,6 +686,14 @@ int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI) {
       // special case: do-while loop latch, not if-else
       if(L && L->getLoopLatch() == entryBB)
         return 0;
+      // special case: rotated while-with-continue condition block
+      // keep this in loop-structured handling, not generic if-else.
+      if (L) {
+        BasicBlock *header = L->getHeader();
+        if (BranchInst *headerBr = dyn_cast<BranchInst>(header->getTerminator()))
+          if (headerBr->isUnconditional() && headerBr->getSuccessor(0) == entryBB)
+            return 0;
+      }
       return 1;
     }
 
@@ -4117,8 +4132,6 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
     PHINode *phi = dyn_cast<PHINode>(Operand);
     for (auto [iv, relatedIVs] : IVMap)
       if (relatedIVs.find(phi) != relatedIVs.end()) {
-        writeOperandInternal(iv);
-
         Value *offset = nullptr;
         for (auto LP : LoopProfiles) {
           if (LP->IV == iv) {
@@ -4153,10 +4166,15 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
             }
           }
         }
-
-        if (offset)
+        if (offset) {
+          writeOperandInternal(iv);
+          Out << " + ";
           writeOperandInternal(offset);
-        return;
+          return;
+        }
+        // ANDREW: If we cannot recover a valid offset, do not collapse this
+        // related IV to the main IV; fall through and print the original value.
+        errs() << "ANDREW: preserving related IV without offset: " << *phi << "\n";
       }
   }
 
@@ -4232,6 +4250,9 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
     
     // Current is now the final replacement (or a cycle representative)
     // Update Operand and continue with the rest of writeOperand
+    if (Current != Operand)
+      errs() << "ANDREW: writeOperand PHI substitution: " << *Operand
+             << " -> " << *Current << "\n";
     Operand = Current;
   }
 
@@ -4396,6 +4417,8 @@ void CWriter::writeOperandWithCast(Value *Operand, unsigned Opcode,
 // Write the operand with a cast to another type based on the icmp predicate
 // being used.
 void CWriter::writeOperandWithCast(Value *Operand, ICmpInst &Cmp) {
+
+  // ANDREW CASTING
   bool shouldCast = needsCast(Operand, Cmp);
 
   // Write out the casted operand if we should, otherwise just write the
@@ -4419,7 +4442,7 @@ void CWriter::writeOperandWithCast(Value *Operand, ICmpInst &Cmp) {
   writeOperand(Operand);
   Out << ")";
 }
-
+// ANDREW CASTING
 bool CWriter::isCSigned(Value *V) const {
   if (isa<ConstantInt>(V))
     return true; // Constants are printed as signed integers in CBE
@@ -7201,8 +7224,12 @@ void CWriter::printFunction(Function &F, bool inlineF) {
 
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         Value *inc = phi->getIncomingValue(i);
-        if (IR2vars.find(inc) != IR2vars.end() && !IR2vars[inc].empty()) {
-          std::string incName = *IR2vars[inc].begin(); // Pick first name
+        Value *phiOp = inc;
+        if (isa<TruncInst>(phiOp) || isa<BitCastInst>(phiOp))
+            phiOp = cast<Instruction>(phiOp)->getOperand(0);
+
+        if (IR2vars.find(phiOp) != IR2vars.end() && !IR2vars[phiOp].empty()) {
+          std::string incName = *IR2vars[phiOp].begin(); // Pick first name
           if (!distinct) {
             candidate = incName;
             distinct = true;
@@ -11025,6 +11052,16 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
 
   Type *IntoT = I.getIndexedType();
   Value *FirstOp = I.getOperand();
+  auto writeGEPIndexOperand = [&](Value *IdxOp) {
+    if (Instruction *IdxInst = dyn_cast<Instruction>(IdxOp)) {
+      if (isa<BinaryOperator>(IdxInst) || isa<CastInst>(IdxInst) ||
+          isa<GetElementPtrInst>(IdxInst)) {
+        writeInstComputationInline(*IdxInst, true);
+        return;
+      }
+    }
+    writeOperandInternal(IdxOp);
+  };
   if (printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)))
     Out << "(&";
 
@@ -11052,12 +11089,12 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
             flattened3D = true;
           }
         }
-        writeOperand(FirstOp);
+        writeGEPIndexOperand(FirstOp);
         if (!flattened3D)
           Out << ')';
       } else {
         errs() << "SUSAN: found negative int" << *FirstOp << "\n";
-        writeOperand(FirstOp);
+        writeGEPIndexOperand(FirstOp);
         Out << ')';
       }
     } else {
@@ -11079,13 +11116,13 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
           Out << "*(";
           writeOperandInternal(Ptr, ContextNormal, false);
           Out << '+';
-          writeOperand(FirstOp);
+          writeGEPIndexOperand(FirstOp);
           Out << ')';
         } else {
           errs() << "SUSAN: writing ptr 9994: " << *Ptr << "\n";
           writeOperandInternal(Ptr, ContextNormal, false);
           Out << '[';
-          writeOperand(FirstOp);
+          writeGEPIndexOperand(FirstOp);
           Out << ']';
         }
         currGEPisPointer = false;
@@ -11093,7 +11130,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
         Out << '(';
         writeOperandInternal(Ptr, ContextNormal, false);
         Out << '+';
-        writeOperand(FirstOp);
+        writeGEPIndexOperand(FirstOp);
         Out << ')';
       }
     } else {
@@ -11103,7 +11140,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
         Out << '(';
         writeOperandInternal(Ptr, ContextNormal, false);
         Out << '+';
-        writeOperand(FirstOp);
+        writeGEPIndexOperand(FirstOp);
         Out << ')';
       } else {
         writeOperandInternal(Ptr, ContextNormal, false);
@@ -11131,12 +11168,12 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
       if (accessMemory) {
         if (flattened3D) {
           Out << "+" << nextSize << "*";
-          writeOperand(Opnd);
+          writeGEPIndexOperand(Opnd);
           Out << ')';
           flattened3D = false;
         } else {
           Out << "[";
-          writeOperand(Opnd);
+          writeGEPIndexOperand(Opnd);
           Out << ']';
           isPointer = false;
         }
@@ -11145,7 +11182,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
           errs() << "SUSAN: 10062: " << *Opnd << "\n";
           currValue2DerefCnt.second--;
           Out << '[';
-          writeOperand(Opnd);
+          writeGEPIndexOperand(Opnd);
           Out << ']';
           isPointer = false;
         } else {

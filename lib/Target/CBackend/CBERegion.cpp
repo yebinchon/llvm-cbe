@@ -1,7 +1,10 @@
 #include "CBackend.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -29,6 +32,51 @@ namespace llvm_cbe {
 
 using namespace llvm;
 
+namespace {
+
+static bool reachesLoopExitFrom(BasicBlock *start, BasicBlock *loopExit,
+                                Loop *loop) {
+  if (!start || !loopExit || !loop)
+    return false;
+
+  SmallVector<BasicBlock *, 16> worklist;
+  SmallPtrSet<BasicBlock *, 32> visited;
+  worklist.push_back(start);
+  while (!worklist.empty()) {
+    BasicBlock *curr = worklist.pop_back_val();
+    if (curr == loopExit)
+      return true;
+    if (!visited.insert(curr).second)
+      continue;
+
+    for (BasicBlock *succ : successors(curr)) {
+      if (succ == loopExit)
+        return true;
+      if (loop->contains(succ))
+        worklist.push_back(succ);
+    }
+  }
+  return false;
+}
+
+} // namespace
+
+LoopRegion *CBERegion2::getContainingLoopRegion(BasicBlock *BB) {
+  LoopRegion *fallback = nullptr;
+  CBERegion2 *ancestorR = parentRegion;
+  while (ancestorR) {
+    if (ancestorR->isaLoopRegion()) {
+      auto *lr = static_cast<LoopRegion *>(ancestorR);
+      if (!fallback)
+        fallback = lr;
+      if (BB && lr->getLoop() && lr->getLoop()->contains(BB))
+        return lr;
+    }
+    ancestorR = ancestorR->getParentRegion();
+  }
+  return fallback;
+}
+
 LinearRegion::LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR,
                            LoopInfo *LI, PostDominatorTree *PDT,
                            DominatorTree *DT, CWriter *cwriter, BasicBlock* endBB)
@@ -53,6 +101,15 @@ LinearRegion::LinearRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   }
 
   while (true) {
+    // Do not let a linear region in a loop absorb outer-scope merge blocks.
+    // This prevents break-only paths from pulling in shared loop-exit code.
+    if (lr && nextBB != entryBB && !lr->getLoop()->contains(nextBB)) {
+      errs() << "ANDREW: stopping linear region at loop boundary before "
+             << nextBB->getName() << "\n";
+      nextEntryBB = nextBB;
+      break;
+    }
+
     if (lr)
       lr->removeBBToVisit(nextBB);
     BBs.push_back(nextBB);
@@ -140,9 +197,11 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     return;
   }
   // ANDREW: Check if either branch exits the parent loop (break statement)
-  else if (getParentLoopRegion()) {
-    bool exitLoopTrueBr = isExitingLoop(trueStartBB);
-    bool exitLoopFalseBr = isExitingLoop(falseStartBB);
+  else if (getContainingLoopRegion(brBB)) {
+    bool exitLoopTrueBr = isExitingLoop(trueStartBB, brBB) &&
+                          !isCanonicalLoopExitBranch(brBB, trueStartBB);
+    bool exitLoopFalseBr = isExitingLoop(falseStartBB, brBB) &&
+                           !isCanonicalLoopExitBranch(brBB, falseStartBB);
     
     if (exitLoopTrueBr && !exitLoopFalseBr) {
       errs() << "ANDREW: True branch exits loop (break)!\n";
@@ -150,7 +209,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
       negateCond = false;
       nextEntryBB = falseStartBB;
       // Mark the exit block as visited so we don't process it
-      if (auto *lr = getParentLoopRegion()) {
+      if (auto *lr = getContainingLoopRegion(brBB)) {
         lr->removeBBToVisit(trueStartBB);
         
         // ANDREW: If there are instructions between the branch and the loop exit (e.g. an inner loop),
@@ -169,7 +228,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
       negateCond = true;  // Negate condition so we have if(!cond) break;
       nextEntryBB = trueStartBB;
       // Mark the exit block as visited so we don't process it
-      if (auto *lr = getParentLoopRegion()) {
+      if (auto *lr = getContainingLoopRegion(brBB)) {
         lr->removeBBToVisit(falseStartBB);
 
         // ANDREW: If there are instructions between the branch and the loop exit
@@ -185,8 +244,8 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     }
     
     // ANDREW: Check if either branch continues the loop (continue statement)
-    bool continueLoopTrueBr = isContinuingLoop(trueStartBB);
-    bool continueLoopFalseBr = isContinuingLoop(falseStartBB);
+    bool continueLoopTrueBr = isContinuingLoop(trueStartBB, brBB);
+    bool continueLoopFalseBr = isContinuingLoop(falseStartBB, brBB);
     
     if (continueLoopTrueBr && !continueLoopFalseBr) {
       errs() << "ANDREW: True branch continues loop (continue)!\n";
@@ -194,7 +253,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
       negateCond = false;
       nextEntryBB = falseStartBB;
       // Mark the continue blocks as visited
-      if (auto *lr = getParentLoopRegion()) {
+      if (auto *lr = getContainingLoopRegion(brBB)) {
         lr->removeBBToVisit(trueStartBB);
         // Also remove backedge blocks that are just branches
         BranchInst *tbr = dyn_cast<BranchInst>(trueStartBB->getTerminator());
@@ -208,7 +267,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
       isLoopContinue = true;
       negateCond = true;
       nextEntryBB = trueStartBB;
-      if (auto *lr = getParentLoopRegion()) {
+      if (auto *lr = getContainingLoopRegion(brBB)) {
         lr->removeBBToVisit(falseStartBB);
         BranchInst *fbr = dyn_cast<BranchInst>(falseStartBB->getTerminator());
         if (fbr && fbr->isUnconditional()) {
@@ -288,6 +347,28 @@ BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
   errs() << "otherStart: " << otherStart->getName() << "\n";
   errs() << PDT->dominates(currBB, brBlock) << "\n";
   while (!PDT->dominates(currBB, brBlock) && currBB != otherStart) {
+    if (lr && currBB == lr->getNextEntryBB()) {
+      errs() << "ANDREW: reached loop exit block " << currBB->getName()
+             << ", stopping subregion generation.\n";
+      break;
+    }
+
+    unsigned startDepth = LI->getLoopDepth(start);
+    unsigned currDepth = LI->getLoopDepth(currBB);
+
+    if (currDepth < startDepth) {
+       // Exited scope - stop
+       errs() << "ANDREW: " << currBB->getName() << " exited scope (Depth " << currDepth << " < " << startDepth << "), stopping.\n";
+       break;
+    }
+
+    // ANDREW: Stop if we've hit a merge point not directly on the break path.
+    // Use dominance: The start of the break path must dominate any block on the exclusive path.
+    // If start does not dominate currBB, it means currBB is reachable from elsewhere (e.g. normal loop exit).
+    if (currBB != start && !DT->dominates(start, currBB)) {
+      errs() << "ANDREW: " << currBB->getName() << " is not dominated by " << start->getName() << ", stopping subregion generation.\n";
+      break;
+    }
     CBERegion2 *subR = createSubRegions(this, currBB, otherStart);
     if (!subR) break;
     if (!isElseBranch)
@@ -309,7 +390,7 @@ void LoopRegion::createCBERegionDAG(BasicBlock *entryBB) {
     CBERegion2 *entryR = createSubRegions(this, nextRegionEntryBB);
     if (!entryR) break;
     LoopBodyRegionDAG.push_back(entryR);
-    if (entryBB == this->latchBB)
+    if (nextRegionEntryBB == this->latchBB)
       return;
 
     nextRegionEntryBB = entryR->getNextEntryBB();
@@ -362,6 +443,12 @@ void LinearRegion::print() {
   for (auto BB : BBs)
     errs() << BB->getName() << "\n";
 }
+bool LinearRegion::containsBlock(BasicBlock *BB) {
+  for (auto *currBB : BBs)
+    if (currBB == BB)
+      return true;
+  return false;
+}
 void IfElseRegion::print() {
   errs() << "IfElse Region with entering block: "
          << getEntryBlock()->getParent()->getName()
@@ -375,11 +462,27 @@ void IfElseRegion::print() {
     R->print();
   errs() << "elseSubRegions end\n";
 }
+bool IfElseRegion::containsBlock(BasicBlock *BB) {
+  if (brBB == BB)
+    return true;
+  for (auto *R : thenSubRegions) {
+    if (R && R->containsBlock(BB))
+      return true;
+  }
+  for (auto *R : elseSubRegions) {
+    if (R && R->containsBlock(BB))
+      return true;
+  }
+  return false;
+}
 void LoopRegion::print() {
   errs() << "Loop Region with entering block: " << getEntryBlock()->getName()
          << "\n";
   for (auto R : LoopBodyRegionDAG)
     R->print();
+}
+bool LoopRegion::containsBlock(BasicBlock *BB) {
+  return loop && BB && loop->contains(BB);
 }
 void CBERegion2::print() {
   errs() << "======================Printing CBERegions================\n";
@@ -392,6 +495,17 @@ void LinearRegion::printRegionDAG() {
   errs() << "Linear Region with entering block: " << getEntryBlock()->getName()
          << "\n";
   for (auto BB : BBs) {
+    // Skip synthetic loop-exit trampoline blocks. Their PHI initialization is
+    // materialized where the structured loop is emitted.
+    if (BB->getName().contains("loopexit")) {
+      auto *br = dyn_cast<BranchInst>(BB->getTerminator());
+      if (br && br->isUnconditional() &&
+          BB->getFirstNonPHIOrDbgOrLifetime() == BB->getTerminator()) {
+        errs() << "ANDREW: skipping loopexit trampoline block "
+               << BB->getName() << "\n";
+        continue;
+      }
+    }
     errs() << "SUSAN: printing bb:" << BB->getName() << "\n";
     cw->printBasicBlock(BB);
   }
@@ -629,11 +743,128 @@ void LoopRegion::printRegionDAG() {
   //   }
   // }
 
+  // Initialize non-IV PHIs from the preheader before entering the loop.
+  for (auto &I : *header) {
+    if (PHINode *phi = dyn_cast<PHINode>(&I)) {
+      if (phi == IV)
+        continue;
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        BasicBlock *incomingBB = phi->getIncomingBlock(i);
+        if (!loop->contains(incomingBB)) {
+          Value *initVal = phi->getIncomingValue(i);
+          if (isa<Constant>(initVal)) {
+            errs() << "ANDREW: Skipping constant preheader PHI init: " << *phi << "\n";
+            break;
+          }
+          // Only materialize preheader init for induction-like PHIs.
+          // This keeps needed initializers (e.g. nza = rowstr[j]) and
+          // avoids redundant reduction carry initializers.
+          Value *loopIncomingVal = nullptr;
+          for (unsigned j = 0; j < phi->getNumIncomingValues(); j++) {
+            if (loop->contains(phi->getIncomingBlock(j))) {
+              loopIncomingVal = phi->getIncomingValue(j);
+              break;
+            }
+          }
+          if (BinaryOperator *loopBinOp = dyn_cast_or_null<BinaryOperator>(loopIncomingVal)) {
+            Value *op0 = loopBinOp->getOperand(0);
+            Value *op1 = loopBinOp->getOperand(1);
+            bool op0IsPhi = (op0 == phi);
+            bool op1IsPhi = (op1 == phi);
+            bool op0IsOne =
+                (isa<ConstantInt>(op0) && cast<ConstantInt>(op0)->isOne()) ||
+                (isa<ConstantFP>(op0) && cast<ConstantFP>(op0)->isExactlyValue(1.0));
+            bool op1IsOne =
+                (isa<ConstantInt>(op1) && cast<ConstantInt>(op1)->isOne()) ||
+                (isa<ConstantFP>(op1) && cast<ConstantFP>(op1)->isExactlyValue(1.0));
+            bool isSimpleStep =
+                ((loopBinOp->getOpcode() == Instruction::Add ||
+                  loopBinOp->getOpcode() == Instruction::FAdd) &&
+                 ((op0IsPhi && op1IsOne) || (op1IsPhi && op0IsOne))) ||
+                ((loopBinOp->getOpcode() == Instruction::Sub ||
+                  loopBinOp->getOpcode() == Instruction::FSub) &&
+                 (op0IsPhi && op1IsOne));
+            if (!isSimpleStep) {
+              errs() << "ANDREW: Skipping non-step preheader PHI init: " << *phi << "\n";
+              break;
+            }
+          }
+          // Reduction-carry PHIs frequently appear as floating-point PHI<-PHI
+          // transitions across nested loops; avoid emitting noisy preheader
+          // rebinds such as "__FIXME__rho_2e_1 = rho".
+          if (isa<PHINode>(loopIncomingVal) && phi->getType()->isFloatingPointTy()) {
+            errs() << "ANDREW: Skipping floating PHI<-PHI preheader init: " << *phi << "\n";
+            break;
+          }
+          std::string phiName = cw->GetValueName(phi);
+          cw->Out << "  " << phiName << " = ";
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(initVal)) {
+            cw->writeOperandInternal(binOp->getOperand(0));
+            switch (binOp->getOpcode()) {
+              case Instruction::Add: cw->Out << " + "; break;
+              case Instruction::FAdd: cw->Out << " + "; break;
+              case Instruction::Sub: cw->Out << " - "; break;
+              case Instruction::FSub: cw->Out << " - "; break;
+              case Instruction::Mul: cw->Out << " * "; break;
+              case Instruction::FMul: cw->Out << " * "; break;
+              case Instruction::UDiv:
+              case Instruction::SDiv:
+              case Instruction::FDiv: cw->Out << " / "; break;
+              case Instruction::URem:
+              case Instruction::SRem:
+              case Instruction::FRem: cw->Out << " % "; break;
+              default: cw->Out << " /* unknown op */ "; break;
+            }
+            cw->writeOperandInternal(binOp->getOperand(1));
+          } else {
+            cw->writeOperandInternal(initVal);
+          }
+          cw->Out << ";\n";
+          break;
+        }
+      }
+    }
+  }
+
+  // Materialize constant PHI values that come from synthetic loopexit blocks
+  // before printing the structured for-loop body.
+  if (nextEntryBB && nextEntryBB->getName().contains("loopexit")) {
+    if (auto *exitBr = dyn_cast<BranchInst>(nextEntryBB->getTerminator())) {
+      if (exitBr->isUnconditional() &&
+          nextEntryBB->getFirstNonPHIOrDbgOrLifetime() ==
+              nextEntryBB->getTerminator()) {
+        BasicBlock *mergeBB = exitBr->getSuccessor(0);
+        for (auto &MI : *mergeBB) {
+          auto *phi = dyn_cast<PHINode>(&MI);
+          if (!phi)
+            break;
+          int incomingIdx = phi->getBasicBlockIndex(nextEntryBB);
+          if (incomingIdx < 0)
+            continue;
+          Value *incomingVal = phi->getIncomingValue(incomingIdx);
+          if (!isa<Constant>(incomingVal))
+            continue;
+          std::string phiName = cw->GetValueName(phi);
+          cw->Out << "  " << phiName << " = ";
+          cw->writeOperandInternal(incomingVal);
+          cw->Out << ";\n";
+          errs() << "ANDREW: pre-initializing loopexit PHI " << *phi << "\n";
+        }
+      }
+    }
+  }
+
   cw->Out << "for(";
 
   // initiation
-  cw->printTypeName(cw->Out, IV->getType(), true);
-  cw->Out << " ";
+  // ANDREW: Only print type if IV name is different from lower bound name
+  // This prevents redeclaration/shadowing when using loop-carried values
+  std::string ivName = cw->GetValueName(IV);
+  std::string lbName = cw->GetValueName(lb);
+  if (ivName != lbName) {
+    cw->printTypeName(cw->Out, IV->getType(), true);
+    cw->Out << " ";
+  }
   cw->Out << cw->GetValueName(IV, true) << " = ";
   if (Instruction *lbInst = dyn_cast<Instruction>(lb))
     cw->writeInstComputationInline(*lbInst);
@@ -644,6 +875,7 @@ void LoopRegion::printRegionDAG() {
   // exit condition
   // Use writeOperandInternal instead of GetValueName to properly handle
   // conversion instructions and get the correct variable name
+  // ANDREW CASTING
   if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
     cw->writeOperandWithCast(condInst->getOperand(0), *icmp);
     if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
@@ -652,8 +884,10 @@ void LoopRegion::printRegionDAG() {
       cw->Out << " < ";
     else
       cw->printCmpOperator(icmp, negateCondition);
+    // ANDREW CASTING
     cw->writeOperandWithCast(condInst->getOperand(1), *icmp);
   } else if (FCmpInst *fcmp = dyn_cast<FCmpInst>(condInst)) {
+    // ANDREW CASTING
     cw->writeOperandInternal(condInst->getOperand(0));
     // Handle float comparisons
     CmpInst::Predicate pred = fcmp->getPredicate();
@@ -697,12 +931,25 @@ void LoopRegion::printRegionDAG() {
   for (auto R : LoopBodyRegionDAG)
     R->printRegionDAG();
 
+  bool latchCoveredByBodyRegion = false;
+  for (auto *R : LoopBodyRegionDAG) {
+    if (R && R->containsBlock(latchBB)) {
+      latchCoveredByBodyRegion = true;
+      break;
+    }
+  }
   // print extra instructions in a latch other than incr and br
-  errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
-  for (auto &I : *latchBB) {
-    errs() << "CBERegion: I 316: " << I << "\n";
-    if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
-      cw->printInstruction(&I);
+  if (!latchCoveredByBodyRegion) {
+    errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
+    for (auto &I : *latchBB) {
+      errs() << "CBERegion: I 316: " << I << "\n";
+      if (!cw->isSkipableInst(&I) && incr != &I &&
+          latchBB->getTerminator() != &I)
+        cw->printInstruction(&I);
+    }
+  } else {
+    errs() << "ANDREW: latch already covered by body regions, skipping "
+           << latchBB->getName() << "\n";
   }
   
 
@@ -719,17 +966,81 @@ void LoopRegion::printRegionDAG() {
         BasicBlock *incomingBB = phi->getIncomingBlock(i);
         if (loop->contains(incomingBB)) {
           Value *incomingVal = phi->getIncomingValue(i);
-          // Skip self-assignments (when incoming value resolves to same name as PHI)
-          std::string phiName = cw->GetValueName(phi);
-          std::string incomingName = cw->GetValueName(incomingVal);
-          if (phiName == incomingName) {
-            errs() << "ANDREW: Skipping self-assignment for PHI: " << *phi << "\n";
+          if (incomingVal == phi) {
+            errs() << "ANDREW: Skipping self-assignment for PHI by identity: " << *phi << "\n";
             break;
+          }
+          std::string phiName = cw->GetValueName(phi);
+          if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            if (cw->GetValueName(incomingVal) == phiName &&
+                !cw->isIVIncrement(incomingInst) &&
+                !isa<BinaryOperator>(incomingInst)) {
+              errs() << "ANDREW: Skipping duplicate PHI update by stable-name match: "
+                     << *phi << "\n";
+              break;
+            }
+          }
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            Value *op0 = binOp->getOperand(0);
+            Value *op1 = binOp->getOperand(1);
+            bool op0IsPhi = (op0 == phi);
+            bool op1IsPhi = (op1 == phi);
+            bool op0IsOne =
+                (isa<ConstantInt>(op0) && cast<ConstantInt>(op0)->isOne()) ||
+                (isa<ConstantFP>(op0) && cast<ConstantFP>(op0)->isExactlyValue(1.0));
+            bool op1IsOne =
+                (isa<ConstantInt>(op1) && cast<ConstantInt>(op1)->isOne()) ||
+                (isa<ConstantFP>(op1) && cast<ConstantFP>(op1)->isExactlyValue(1.0));
+            bool isSimpleStep =
+                ((binOp->getOpcode() == Instruction::Add ||
+                  binOp->getOpcode() == Instruction::FAdd) &&
+                 ((op0IsPhi && op1IsOne) || (op1IsPhi && op0IsOne))) ||
+                ((binOp->getOpcode() == Instruction::Sub ||
+                  binOp->getOpcode() == Instruction::FSub) &&
+                 (op0IsPhi && op1IsOne));
+            // Skip duplicate reduction-style PHI updates (already emitted in body),
+            // but keep simple step updates like nza = nza + 1.
+            if (!isSimpleStep) {
+              std::string incomingName = cw->GetValueName(incomingVal);
+              if (incomingName != phiName) {
+                // Keep carry propagation (e.g. rho0 = rho) by assigning from the
+                // incoming recurrence value, not from op0 (which may still be phi).
+                cw->Out << "  " << phiName << " = ";
+                cw->writeOperandInternal(incomingVal);
+                cw->Out << ";\n";
+                errs() << "ANDREW: Emitting carry-only PHI update for reduction: "
+                       << *phi << " = " << *incomingVal << "\n";
+              } else {
+                errs() << "ANDREW: Skipping duplicate reduction PHI update: " << *phi
+                       << " = " << *incomingVal << "\n";
+              }
+              break;
+            }
           }
           // Emit: phi_name = incoming_value;
           // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
           cw->Out << "  " << phiName << " = ";
-          cw->writeOperandInternal(incomingVal);
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            cw->writeOperandInternal(binOp->getOperand(0));
+            switch (binOp->getOpcode()) {
+              case Instruction::Add: cw->Out << " + "; break;
+              case Instruction::FAdd: cw->Out << " + "; break;
+              case Instruction::Sub: cw->Out << " - "; break;
+              case Instruction::FSub: cw->Out << " - "; break;
+              case Instruction::Mul: cw->Out << " * "; break;
+              case Instruction::FMul: cw->Out << " * "; break;
+              case Instruction::UDiv:
+              case Instruction::SDiv:
+              case Instruction::FDiv: cw->Out << " / "; break;
+              case Instruction::URem:
+              case Instruction::SRem:
+              case Instruction::FRem: cw->Out << " % "; break;
+              default: cw->Out << " /* unknown op */ "; break;
+            }
+            cw->writeOperandInternal(binOp->getOperand(1));
+          } else {
+            cw->writeOperandInternal(incomingVal);
+          }
           cw->Out << ";\n";
           errs() << "ANDREW: Emitting PHI update: " << *phi << " = " << *incomingVal << "\n";
           break;
@@ -807,12 +1118,39 @@ void LoopRegion::printDoWhileLoop() {
           Value *incomingVal = phi->getIncomingValue(i);
           // Don't emit self-assignments (phi = phi)
           if (incomingVal == phi) continue;
-          // Skip self-assignments (when incoming value resolves to same name as PHI)
           std::string phiName = cw->GetValueName(phi);
-          std::string incomingName = cw->GetValueName(incomingVal);
-          if (phiName == incomingName) {
-            errs() << "ANDREW: Skipping self-assignment for do-while PHI: " << *phi << "\n";
-            break;
+          if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            if (cw->GetValueName(incomingVal) == phiName &&
+                !cw->isIVIncrement(incomingInst) &&
+                !isa<BinaryOperator>(incomingInst)) {
+              errs() << "ANDREW: Skipping duplicate do-while PHI update by stable-name match: "
+                     << *phi << "\n";
+              break;
+            }
+          }
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            Value *op0 = binOp->getOperand(0);
+            Value *op1 = binOp->getOperand(1);
+            bool op0IsPhi = (op0 == phi);
+            bool op1IsPhi = (op1 == phi);
+            bool op0IsOne =
+                (isa<ConstantInt>(op0) && cast<ConstantInt>(op0)->isOne()) ||
+                (isa<ConstantFP>(op0) && cast<ConstantFP>(op0)->isExactlyValue(1.0));
+            bool op1IsOne =
+                (isa<ConstantInt>(op1) && cast<ConstantInt>(op1)->isOne()) ||
+                (isa<ConstantFP>(op1) && cast<ConstantFP>(op1)->isExactlyValue(1.0));
+            bool isSimpleStep =
+                ((binOp->getOpcode() == Instruction::Add ||
+                  binOp->getOpcode() == Instruction::FAdd) &&
+                 ((op0IsPhi && op1IsOne) || (op1IsPhi && op0IsOne))) ||
+                ((binOp->getOpcode() == Instruction::Sub ||
+                  binOp->getOpcode() == Instruction::FSub) &&
+                 (op0IsPhi && op1IsOne));
+            if (!isSimpleStep) {
+              errs() << "ANDREW: Skipping duplicate do-while reduction PHI update: " << *phi
+                     << " = " << *incomingVal << "\n";
+              break;
+            }
           }
           
           // Emit: phi_name = incoming_expression;
@@ -825,12 +1163,17 @@ void LoopRegion::printDoWhileLoop() {
             cw->writeOperandInternal(binOp->getOperand(0));
             switch (binOp->getOpcode()) {
               case Instruction::Add: cw->Out << " + "; break;
+              case Instruction::FAdd: cw->Out << " + "; break;
               case Instruction::Sub: cw->Out << " - "; break;
+              case Instruction::FSub: cw->Out << " - "; break;
               case Instruction::Mul: cw->Out << " * "; break;
+              case Instruction::FMul: cw->Out << " * "; break;
               case Instruction::UDiv:
-              case Instruction::SDiv: cw->Out << " / "; break;
+              case Instruction::SDiv:
+              case Instruction::FDiv: cw->Out << " / "; break;
               case Instruction::URem:
-              case Instruction::SRem: cw->Out << " % "; break;
+              case Instruction::SRem:
+              case Instruction::FRem: cw->Out << " % "; break;
               default: cw->Out << " /* unknown op */ "; break;
             }
             cw->writeOperandInternal(binOp->getOperand(1));
@@ -942,16 +1285,37 @@ void LoopRegion::printWhileLoop() {
   BasicBlock *header = loop->getHeader();
   bool negateCondition = false;
   Instruction *condInst = cw->findCondInst(loop, negateCondition);
+  BasicBlock *condBlock = nullptr;
   
   // Handle case where we can't find a condition instruction
   if (!condInst) {
-    errs() << "Warning: condInst is null in printWhileLoop, emitting simple loop\n";
-    cw->Out << "while(1) { // TODO: fix loop condition\n";
-    cw->printBasicBlock(loop->getHeader());
-    for (auto R : LoopBodyRegionDAG)
-      R->printRegionDAG();
-    cw->Out << "}\n";
-    return;
+    errs() << "ANDREW: condInst is null in printWhileLoop, trying header fallback\n";
+    if (BranchInst *headerBr = dyn_cast<BranchInst>(header->getTerminator())) {
+      if (!headerBr->isConditional() && headerBr->getNumSuccessors() == 1) {
+        BasicBlock *fallbackCondBlock = headerBr->getSuccessor(0);
+        if (BranchInst *fallbackCondBr =
+                dyn_cast<BranchInst>(fallbackCondBlock->getTerminator())) {
+          if (fallbackCondBr->isConditional()) {
+            Value *fallbackCond = fallbackCondBr->getCondition();
+            condInst = dyn_cast<Instruction>(fallbackCond);
+            if (condInst) {
+              condBlock = fallbackCondBlock;
+              errs() << "ANDREW: recovered condInst from header successor block "
+                     << condBlock->getName() << "\n";
+            }
+          }
+        }
+      }
+    }
+    if (!condInst) {
+      errs() << "ANDREW: condInst fallback failed in printWhileLoop, emitting simple loop\n";
+      cw->Out << "while(1) { // TODO: fix loop condition\n";
+      cw->printBasicBlock(loop->getHeader());
+      for (auto R : LoopBodyRegionDAG)
+        R->printRegionDAG();
+      cw->Out << "}\n";
+      return;
+    }
   }
   
   errs() << *condInst << "\n";
@@ -960,7 +1324,8 @@ void LoopRegion::printWhileLoop() {
   // TODO: move to later?
   // cond block should be latch
   std::set<Value *> condRelatedInsts;
-  BasicBlock *condBlock = condInst->getParent();
+  if (!condBlock)
+    condBlock = condInst->getParent();
   cw->findCondRelatedInsts(condBlock, condRelatedInsts);
   for (auto condRelatedInst : condRelatedInsts) {
     Instruction *inst = cast<Instruction>(condRelatedInst);
@@ -1008,7 +1373,7 @@ void LoopRegion::printWhileLoop() {
   errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
   for (auto &I : *latchBB) {
     errs() << "CBERegion: I 316: " << I << "\n";
-    if ((cw->isIVIncrement(&I)) && latchBB->getTerminator() != &I)
+    if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
       cw->printInstruction(&I);
   }
 
@@ -1023,12 +1388,43 @@ void LoopRegion::printWhileLoop() {
         BasicBlock *incomingBB = phi->getIncomingBlock(i);
         if (loop->contains(incomingBB)) {
           Value *incomingVal = phi->getIncomingValue(i);
-          // Skip self-assignments (when incoming value resolves to same name as PHI)
-          std::string phiName = cw->GetValueName(phi);
-          std::string incomingName = cw->GetValueName(incomingVal);
-          if (phiName == incomingName) {
-            errs() << "ANDREW: Skipping self-assignment for while PHI: " << *phi << "\n";
+          if (incomingVal == phi) {
+            errs() << "ANDREW: Skipping self-assignment for while PHI by identity: " << *phi << "\n";
             break;
+          }
+          std::string phiName = cw->GetValueName(phi);
+          if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            if (cw->GetValueName(incomingVal) == phiName &&
+                !cw->isIVIncrement(incomingInst) &&
+                !isa<BinaryOperator>(incomingInst)) {
+              errs() << "ANDREW: Skipping duplicate while PHI update by stable-name match: "
+                     << *phi << "\n";
+              break;
+            }
+          }
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            Value *op0 = binOp->getOperand(0);
+            Value *op1 = binOp->getOperand(1);
+            bool op0IsPhi = (op0 == phi);
+            bool op1IsPhi = (op1 == phi);
+            bool op0IsOne =
+                (isa<ConstantInt>(op0) && cast<ConstantInt>(op0)->isOne()) ||
+                (isa<ConstantFP>(op0) && cast<ConstantFP>(op0)->isExactlyValue(1.0));
+            bool op1IsOne =
+                (isa<ConstantInt>(op1) && cast<ConstantInt>(op1)->isOne()) ||
+                (isa<ConstantFP>(op1) && cast<ConstantFP>(op1)->isExactlyValue(1.0));
+            bool isSimpleStep =
+                ((binOp->getOpcode() == Instruction::Add ||
+                  binOp->getOpcode() == Instruction::FAdd) &&
+                 ((op0IsPhi && op1IsOne) || (op1IsPhi && op0IsOne))) ||
+                ((binOp->getOpcode() == Instruction::Sub ||
+                  binOp->getOpcode() == Instruction::FSub) &&
+                 (op0IsPhi && op1IsOne));
+            if (!isSimpleStep) {
+              errs() << "ANDREW: Skipping duplicate while reduction PHI update: " << *phi
+                     << " = " << *incomingVal << "\n";
+              break;
+            }
           }
           // Emit: phi_name = incoming_value;
           // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
@@ -1064,7 +1460,7 @@ void LoopRegion::printWhileLoopWithContinue() {
   // Get the condition from the condBlock
   BranchInst *condBr = dyn_cast<BranchInst>(condBlock->getTerminator());
   if (!condBr || !condBr->isConditional()) {
-    errs() << "ERROR: Expected conditional branch in condition block\n";
+    errs() << "ANDREW: Expected conditional branch in condition block, falling back to printWhileLoop\n";
     printWhileLoop();
     return;
   }
@@ -1090,11 +1486,23 @@ void LoopRegion::printWhileLoopWithContinue() {
     bodySucc = succ0;
     negateCondition = false;  // Branch to body on true
   } else {
-    if (succ0 == nextEntryBB) {
+    bool succ0LeadsToExit = reachesLoopExitFrom(succ0, nextEntryBB, loop);
+    bool succ1LeadsToExit = reachesLoopExitFrom(succ1, nextEntryBB, loop);
+    if (succ0LeadsToExit != succ1LeadsToExit) {
+      exitSucc = succ0LeadsToExit ? succ0 : succ1;
+      bodySucc = succ0LeadsToExit ? succ1 : succ0;
+      negateCondition = (exitSucc == succ0);
+    } else if (succ0 == nextEntryBB) {
       exitSucc = succ0;
       bodySucc = succ1;
       negateCondition = true;
+    } else if (succ1 == nextEntryBB) {
+      exitSucc = succ1;
+      bodySucc = succ0;
+      negateCondition = false;
     } else {
+      errs() << "ANDREW: ambiguous condition successors in whileLoopWithContinue at "
+             << condBlock->getName() << ", defaulting to succ1 as exit\n";
       exitSucc = succ1;
       bodySucc = succ0;
       negateCondition = false;
@@ -1161,7 +1569,7 @@ void LoopRegion::printWhileLoopWithContinue() {
   errs() << "CBERegion: printing latchBB " << latchBB->getName() << "\n";
   for (auto &I : *latchBB) {
     errs() << "CBERegion: I 316: " << I << "\n";
-    if ((cw->isIVIncrement(&I)) && latchBB->getTerminator() != &I)
+    if (!cw->isSkipableInst(&I) && incr != &I && latchBB->getTerminator() != &I)
       cw->printInstruction(&I);
   }
 
@@ -1176,11 +1584,53 @@ void LoopRegion::printWhileLoopWithContinue() {
         BasicBlock *incomingBB = phi->getIncomingBlock(i);
         if (loop->contains(incomingBB)) {
           Value *incomingVal = phi->getIncomingValue(i);
-          // Skip self-assignments (when incoming value resolves to same name as PHI)
+          if (incomingVal == phi) {
+            errs() << "ANDREW: Skipping self-assignment for whileWithContinue PHI by identity: " << *phi << "\n";
+            break;
+          }
           std::string phiName = cw->GetValueName(phi);
-          std::string incomingName = cw->GetValueName(incomingVal);
-          if (phiName == incomingName) {
-            errs() << "ANDREW: Skipping self-assignment for whileWithContinue PHI: " << *phi << "\n";
+          if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            if (cw->GetValueName(incomingVal) == phiName &&
+                !cw->isIVIncrement(incomingInst) &&
+                !isa<BinaryOperator>(incomingInst)) {
+              errs() << "ANDREW: Skipping duplicate whileWithContinue PHI update by stable-name match: "
+                     << *phi << "\n";
+              break;
+            }
+          }
+          if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            Value *op0 = binOp->getOperand(0);
+            Value *op1 = binOp->getOperand(1);
+            bool op0IsPhi = (op0 == phi);
+            bool op1IsPhi = (op1 == phi);
+            bool op0IsOne =
+                (isa<ConstantInt>(op0) && cast<ConstantInt>(op0)->isOne()) ||
+                (isa<ConstantFP>(op0) && cast<ConstantFP>(op0)->isExactlyValue(1.0));
+            bool op1IsOne =
+                (isa<ConstantInt>(op1) && cast<ConstantInt>(op1)->isOne()) ||
+                (isa<ConstantFP>(op1) && cast<ConstantFP>(op1)->isExactlyValue(1.0));
+            bool isSimpleStep =
+                ((binOp->getOpcode() == Instruction::Add ||
+                  binOp->getOpcode() == Instruction::FAdd) &&
+                 ((op0IsPhi && op1IsOne) || (op1IsPhi && op0IsOne))) ||
+                ((binOp->getOpcode() == Instruction::Sub ||
+                  binOp->getOpcode() == Instruction::FSub) &&
+                 (op0IsPhi && op1IsOne));
+            if (!isSimpleStep) {
+              errs() << "ANDREW: Skipping duplicate whileWithContinue reduction PHI update: " << *phi
+                     << " = " << *incomingVal << "\n";
+              break;
+            }
+            // Emit explicit step update to avoid phi-replacement collapse
+            // turning "x = x + 1" into "x = x".
+            cw->Out << "  " << phiName << " = " << phiName;
+            if (binOp->getOpcode() == Instruction::Sub ||
+                binOp->getOpcode() == Instruction::FSub)
+              cw->Out << " - 1;\n";
+            else
+              cw->Out << " + 1;\n";
+            errs() << "ANDREW: Emitting explicit whileWithContinue PHI step: "
+                   << phiName << "\n";
             break;
           }
           // Emit: phi_name = incoming_value;
@@ -1285,10 +1735,20 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
         startBB = succ1;  // succ0 exits, succ1 is body
       } else if (!loop->contains(succ1)) {
         startBB = succ0;  // succ1 exits, succ0 is body
-      } else if (succ0 == nextEntryBB) {
-        startBB = succ1;
       } else {
-        startBB = succ0;
+        bool succ0LeadsToExit = reachesLoopExitFrom(succ0, nextEntryBB, loop);
+        bool succ1LeadsToExit = reachesLoopExitFrom(succ1, nextEntryBB, loop);
+        if (succ0LeadsToExit != succ1LeadsToExit) {
+          startBB = succ0LeadsToExit ? succ1 : succ0;
+        } else if (succ0 == nextEntryBB) {
+          startBB = succ1;
+        } else if (succ1 == nextEntryBB) {
+          startBB = succ0;
+        } else {
+          errs() << "ANDREW: ambiguous whileLoopWithContinue body successor at "
+                 << condBlock->getName() << ", defaulting to succ0\n";
+          startBB = succ0;
+        }
       }
       errs() << "WhileWithContinue StartBB: " << startBB->getName() << "\n";
       errs() << "WhileWithContinue ConditionBlock: " << conditionBlock->getName() << "\n";
