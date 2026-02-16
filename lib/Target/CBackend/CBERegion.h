@@ -118,6 +118,8 @@ class CBERegion2 {
 
   private:
   std::vector<CBERegion2*>CBERegionDAG;
+  std::set<BasicBlock*> regionBuildVisited;
+  std::set<std::pair<BasicBlock*, BasicBlock*>> activeCreateSubregions;
 };
 
 class LinearRegion : public CBERegion2{
@@ -191,7 +193,7 @@ class IfElseRegion : public CBERegion2 {
   bool containsBlock(BasicBlock *BB) override;
 
   private:
-  BasicBlock* createSubIfElseRegions(BasicBlock* start, BasicBlock *brBlock, BasicBlock *otherStart, bool isElseBranch = false);
+  BasicBlock* createSubIfElseRegions(BasicBlock* start, BasicBlock *brBlock, BasicBlock *stopBB, bool isElseBranch = false);
   void removeIfElseBlockFromLR(LoopRegion* lr, BasicBlock *brBB);
 
   int dominatedByReturn(BasicBlock* brBB){
@@ -258,6 +260,13 @@ class IfElseRegion : public CBERegion2 {
 
   // Check if a basic block branches back to the loop header/condition
   // (for continue detection in while loops with continue)
+  bool isTrivialContinueBlock(BasicBlock *bb) {
+    if (!bb)
+      return false;
+    Instruction *firstReal = bb->getFirstNonPHIOrDbgOrLifetime();
+    return firstReal && firstReal == bb->getTerminator();
+  }
+
   bool isContinuingLoop(BasicBlock* bb, BasicBlock *from = nullptr) {
     BasicBlock *anchor = from ? from : bb;
     LoopRegion *lr = getContainingLoopRegion(anchor);
@@ -277,24 +286,31 @@ class IfElseRegion : public CBERegion2 {
       // For whileLoopWithContinue, continue should target the condition path,
       // not the outer header/latch progression block.
       if (condition) {
-        if (succ == condition) return true;
+        if (succ == condition && isTrivialContinueBlock(bb))
+          return true;
         if (succ == header || succ == latch) continue;
         if (L->contains(succ)) {
           BranchInst *succBr = dyn_cast<BranchInst>(succ->getTerminator());
           if (succBr && succBr->isUnconditional() &&
               succBr->getSuccessor(0) == condition &&
-              succ != header && succ != latch)
+              succ != header && succ != latch &&
+              isTrivialContinueBlock(bb) &&
+              isTrivialContinueBlock(succ))
             return true;
         }
         continue;
       }
-      if (succ == header || succ == latch) return true;
+      if ((succ == header || succ == latch) && isTrivialContinueBlock(bb))
+        return true;
       // Also check if succ is a single-block that just branches to header/latch.
       if (L->contains(succ)) {
         BranchInst *succBr = dyn_cast<BranchInst>(succ->getTerminator());
         if (succBr && succBr->isUnconditional()) {
           BasicBlock *target = succBr->getSuccessor(0);
-          if (target == header || target == latch) return true;
+          if ((target == header || target == latch) &&
+              isTrivialContinueBlock(bb) &&
+              isTrivialContinueBlock(succ))
+            return true;
         }
       }
     }
@@ -306,6 +322,11 @@ class IfElseRegion : public CBERegion2 {
     bool NoElseRegion = true;
     for (auto bb : branchBBs) {
       for (auto &I : *bb) {
+        // Treat short-circuit CFG blocks as "branch-only" if they only contain
+        // compare/phi/debug plumbing plus the branch.
+        if (isa<BranchInst>(&I) || isa<CmpInst>(&I) || isa<PHINode>(&I) ||
+            isa<DbgInfoIntrinsic>(&I))
+          continue;
         if (!isa<BranchInst>(&I)) {
           NoElseRegion = false;
           errs() << "No Else Region is false\n";
@@ -325,6 +346,7 @@ class IfElseRegion : public CBERegion2 {
   BasicBlock* falseStartBB;
   std::set<BasicBlock*> trueBBs;
   std::set<BasicBlock*> falseBBs;
+  std::set<BasicBlock*> claimedSubregionEntries;
   
   // For loop break detection
   bool isLoopBreak = false;

@@ -155,8 +155,8 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   this->pdBB = PDT->getNode(brBB)->getIDom()->getBlock();
   if(this->pdBB) errs() << this->pdBB->getName() << "\n";
 
-  bool trueBrOnly;
-  bool falseBrOnly;
+  bool trueBrOnly = false;
+  bool falseBrOnly = false;
 
   // Control flow exits in if-else block
   // Assume two ways of exiting: a return statement as the terminator
@@ -167,6 +167,12 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   // Nested statements may require a bottom-up approach
   bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
   bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
+  // A branch target that is exactly this if-region's postdom merge is not an
+  // early return path; it is normal structured fallthrough toward function end.
+  bool trueBranchIsMerge = (pdBB && trueStartBB == pdBB);
+  bool falseBranchIsMerge = (pdBB && falseStartBB == pdBB);
+  bool trueEarlyExit = exitFunctionTrueBr && !trueBranchIsMerge;
+  bool falseEarlyExit = exitFunctionFalseBr && !falseBranchIsMerge;
   // Four possible control flows: both exit, only one exits
   // Both exits is likely at the end of the program - NOT an early return pattern
   if (exitFunctionTrueBr && exitFunctionFalseBr) {
@@ -180,7 +186,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   // These are easier - the one that exits is an "early exit" and the fall-through continues the rest of the program.
   // Don't use the calculated postdominator!!
   // ANDREW: Only trigger early return when ONE branch exits, not both
-  else if (exitFunctionTrueBr && !exitFunctionFalseBr) {
+  else if (trueEarlyExit && !falseEarlyExit) {
     errs() << "True branch exits function!!\n";
     // ANDREW: Just emit return; statement, don't process subregions
     isFunctionReturn = true;
@@ -188,7 +194,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     nextEntryBB = falseStartBB;
     return;
   }
-  else if (exitFunctionFalseBr && !exitFunctionTrueBr) {
+  else if (falseEarlyExit && !trueEarlyExit) {
     errs() << "False branch exits function!!\n";
     // ANDREW: Just emit return; statement, negate condition
     isFunctionReturn = true;
@@ -290,17 +296,134 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
       falseBBs.insert(&BB);
   }
   // checking if the other branch section has branches???
-  //bool trueBrOnly = noElseRegion(true);
-  //bool falseBrOnly = noElseRegion(false);
+  trueBrOnly = noElseRegion(true);
+  falseBrOnly = noElseRegion(false);
+  bool forcedByShortCircuitTail = false;
+  // Short-circuit chains (e.g. a&&b&&c) create nested if-regions where the
+  // fail-tail successor is shared with the parent region. In that case, the
+  // shared tail must be owned once by the outer region; forcing both branches
+  // at each nested level causes recursive re-expansion and can diverge.
+  if (parentRegion && parentRegion->isaIfElseRegion()) {
+    auto *parentIf = static_cast<IfElseRegion *>(parentRegion);
+    if (falseStartBB == parentIf->falseStartBB && trueStartBB != falseStartBB) {
+      errs() << "ANDREW: forcing true-branch-only due shared false short-circuit tail in "
+             << brBB->getName() << "\n";
+      trueBrOnly = true;
+      falseBrOnly = false;
+      forcedByShortCircuitTail = true;
+    } else if (trueStartBB == parentIf->trueStartBB &&
+               falseStartBB != trueStartBB) {
+      errs() << "ANDREW: forcing false-branch-only due shared true short-circuit tail in "
+             << brBB->getName() << "\n";
+      trueBrOnly = false;
+      falseBrOnly = true;
+      forcedByShortCircuitTail = true;
+    }
+  }
   // -1: neither branch leads to return
   // 0: true branch leads to return
   // 1: false branch leads to return
   // This is weird... only works for very particular control flow
   int returnDominated = dominatedByReturn(brBB);
-  if (!trueBrOnly && !falseBrOnly && returnDominated == -1) {
-    trueBrOnly = (exitFunctionTrueBr && !exitFunctionFalseBr);
-    falseBrOnly = (exitFunctionFalseBr && !exitFunctionTrueBr);
+  errs() << "CBERegion_DEBUG: initial branch-only flags in "
+         << brBB->getParent()->getName() << "::" << brBB->getName()
+         << " trueBrOnly=" << trueBrOnly
+         << " falseBrOnly=" << falseBrOnly
+         << " returnDominated=" << returnDominated << "\n";
+
+  // If the merge block carries PHI values from both successors, keep explicit
+  // if/else structure to preserve per-branch assignments and avoid hoisting one
+  // path outside the conditional.
+  bool needsBothBranchesForPhi = false;
+  if (pdBB) {
+    for (auto &I : *pdBB) {
+      PHINode *phi = dyn_cast<PHINode>(&I);
+      if (!phi)
+        break;
+      int trueIdx = phi->getBasicBlockIndex(trueStartBB);
+      int falseIdx = phi->getBasicBlockIndex(falseStartBB);
+      if (trueIdx >= 0 && falseIdx >= 0) {
+        needsBothBranchesForPhi = true;
+        break;
+      }
+    }
   }
+  if (!forcedByShortCircuitTail && needsBothBranchesForPhi) {
+    errs() << "ANDREW: forcing both branches due to merge PHI dependencies in "
+           << brBB->getName() << "\n";
+    trueBrOnly = false;
+    falseBrOnly = false;
+  }
+
+  if (!forcedByShortCircuitTail && !needsBothBranchesForPhi &&
+      !trueBrOnly && !falseBrOnly &&
+      returnDominated == -1) {
+    trueBrOnly = (trueEarlyExit && !falseEarlyExit);
+    falseBrOnly = (falseEarlyExit && !trueEarlyExit);
+  }
+
+  auto blockHasNonTrivialWork = [](BasicBlock *BB) -> bool {
+    if (!BB)
+      return false;
+    for (auto &I : *BB) {
+      if (&I == BB->getTerminator())
+        break;
+      if (isa<DbgInfoIntrinsic>(&I))
+        continue;
+      // Treat only side-effecting instructions as "real work" for deciding
+      // whether we must keep an explicit else branch.
+      if (I.mayHaveSideEffects())
+        return true;
+    }
+    return false;
+  };
+
+  auto pathHasNonTrivialWork = [&](BasicBlock *start, BasicBlock *stop) -> bool {
+    if (!start || start == stop)
+      return false;
+
+    // Explore the whole branch subgraph (until the merge) instead of only
+    // unconditional chains. Otherwise we can miss side effects behind a
+    // conditional block (e.g. if.end588 -> if.then591 -> printf in FT verify).
+    SmallVector<BasicBlock *, 32> worklist;
+    SmallPtrSet<BasicBlock *, 32> visited;
+    worklist.push_back(start);
+
+    while (!worklist.empty()) {
+      BasicBlock *curr = worklist.pop_back_val();
+      if (!curr || curr == stop)
+        continue;
+      if (!visited.insert(curr).second)
+        continue;
+      if (blockHasNonTrivialWork(curr))
+        return true;
+      for (BasicBlock *succ : successors(curr)) {
+        if (succ && succ != stop)
+          worklist.push_back(succ);
+      }
+    }
+    return false;
+  };
+
+  // Single-branch optimization is only valid when the opposite path is a
+  // pure trampoline to the merge. If it carries work, emit explicit else.
+  if (!forcedByShortCircuitTail &&
+      trueBrOnly && pathHasNonTrivialWork(falseStartBB, pdBB)) {
+    errs() << "ANDREW: forcing both branches because false path has work in "
+           << brBB->getName() << "\n";
+    trueBrOnly = false;
+  }
+  if (!forcedByShortCircuitTail &&
+      falseBrOnly && pathHasNonTrivialWork(trueStartBB, pdBB)) {
+    errs() << "ANDREW: forcing both branches because true path has work in "
+           << brBB->getName() << "\n";
+    falseBrOnly = false;
+  }
+
+  errs() << "CBERegion_DEBUG: final branch-only flags in "
+         << brBB->getParent()->getName() << "::" << brBB->getName()
+         << " trueBrOnly=" << trueBrOnly
+         << " falseBrOnly=" << falseBrOnly << "\n";
 
   if (trueBrOnly && (returnDominated == -1)) {
     errs() << "SUSAN: marking only true branch\n";
@@ -319,11 +442,18 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   } else {
     errs() << "SUSAN: marking both branches\n";
     auto nextEntryBB1 =
-        createSubIfElseRegions(trueStartBB, brBB, falseStartBB, false);
+        createSubIfElseRegions(trueStartBB, brBB, pdBB, false);
     auto nextEntryBB2 =
-        createSubIfElseRegions(falseStartBB, brBB, trueStartBB, true);
-    nextEntryBB = nextEntryBB1 ? nextEntryBB1 : nextEntryBB2;
-    errs() << "CBERegion: nextEntryBB 121: " << nextEntryBB->getName() << "\n";
+        createSubIfElseRegions(falseStartBB, brBB, pdBB, true);
+    // For full if/else regions, ownership must hand off at the merge exactly once.
+    if (pdBB)
+      nextEntryBB = pdBB;
+    else
+      nextEntryBB = nextEntryBB1 ? nextEntryBB1 : nextEntryBB2;
+    if (nextEntryBB)
+      errs() << "CBERegion: nextEntryBB 121: " << nextEntryBB->getName() << "\n";
+    else
+      errs() << "CBERegion: nextEntryBB 121: <null>\n";
   }
 
   if (parentR && parentR->isaLoopRegion())
@@ -335,18 +465,32 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
 
 BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
                                                  BasicBlock *brBlock,
-                                                 BasicBlock *otherStart,
+                                                 BasicBlock *stopBB,
                                                  bool isElseBranch) {
   LoopRegion *lr = getParentLoopRegion();
   if (lr)
     lr->removeBBToVisit(brBlock);
 
   BasicBlock *currBB = start;
+  std::set<BasicBlock *> visitedBBs;
+  unsigned iterationCount = 0;
+  const unsigned maxIterations = 10000;
   // TODO: this is a hasty patch
   errs() << start->getName() << " to " << brBlock->getName() << "\n";
-  errs() << "otherStart: " << otherStart->getName() << "\n";
+  errs() << "stopBB: " << (stopBB ? stopBB->getName() : StringRef("<null>")) << "\n";
   errs() << PDT->dominates(currBB, brBlock) << "\n";
-  while (!PDT->dominates(currBB, brBlock) && currBB != otherStart) {
+  while (currBB && !PDT->dominates(currBB, brBlock) && currBB != stopBB) {
+    if (!visitedBBs.insert(currBB).second) {
+      errs() << "ANDREW: detected repeated block in subregion generation: "
+             << currBB->getName() << ", stopping to avoid cycling.\n";
+      break;
+    }
+    if (++iterationCount > maxIterations) {
+      errs() << "ANDREW: subregion generation exceeded max iterations for "
+             << brBlock->getName() << ", stopping defensively.\n";
+      break;
+    }
+
     if (lr && currBB == lr->getNextEntryBB()) {
       errs() << "ANDREW: reached loop exit block " << currBB->getName()
              << ", stopping subregion generation.\n";
@@ -369,7 +513,12 @@ BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
       errs() << "ANDREW: " << currBB->getName() << " is not dominated by " << start->getName() << ", stopping subregion generation.\n";
       break;
     }
-    CBERegion2 *subR = createSubRegions(this, currBB, otherStart);
+    if (!claimedSubregionEntries.insert(currBB).second) {
+      errs() << "ANDREW: duplicate subregion entry claim in same if-region: "
+             << currBB->getName() << ", stopping sibling re-expansion.\n";
+      break;
+    }
+    CBERegion2 *subR = createSubRegions(this, currBB, stopBB);
     if (!subR) break;
     if (!isElseBranch)
       thenSubRegions.push_back(subR);
@@ -377,7 +526,13 @@ BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
       elseSubRegions.push_back(subR);
     if (isa<UnreachableInst>(currBB->getTerminator()))
       break;
-    currBB = subR->getNextEntryBB();
+    BasicBlock *nextBB = subR->getNextEntryBB();
+    if (nextBB == currBB) {
+      errs() << "ANDREW: subregion next-entry did not advance at "
+             << currBB->getName() << ", stopping to avoid infinite loop.\n";
+      break;
+    }
+    currBB = nextBB;
     if(!currBB) break;
     errs() << "SUSAN: currbb 562: " << currBB->getName() << "\n";
   }
@@ -417,6 +572,20 @@ void LoopRegion::createCBERegionDAG(BasicBlock *entryBB) {
 
 void CBERegion2::createCBERegionDAG(BasicBlock *entryBB, CBERegion2 *parentR,
                                     BasicBlock *endBB) {
+  // Reset traversal state at the outermost entry.
+  if (CBERegionDAG.empty()) {
+    regionBuildVisited.clear();
+    activeCreateSubregions.clear();
+  }
+
+  if (!entryBB)
+    return;
+  if (!regionBuildVisited.insert(entryBB).second) {
+    errs() << "ANDREW: CBERegion: detected recursive revisit of entry block "
+           << entryBB->getName() << ", stopping region DAG recursion.\n";
+    return;
+  }
+
   errs() << "YEBIN: in Function " << entryBB->getParent()->getName();
   if (parentR)
     errs() << " with ParentR " << parentR->getEntryBlock()->getName();
@@ -433,6 +602,11 @@ void CBERegion2::createCBERegionDAG(BasicBlock *entryBB, CBERegion2 *parentR,
   if (nextRegionEntryBB) {
     errs() << "SUSAN: nextRegionEntryBB " << nextRegionEntryBB->getName()
            << "\n";
+    if (nextRegionEntryBB == entryBB) {
+      errs() << "ANDREW: CBERegion: nextRegionEntryBB did not advance from "
+             << entryBB->getName() << ", stopping recursion.\n";
+      return;
+    }
     createCBERegionDAG(nextRegionEntryBB, parentR, endBB);
   }
 }
@@ -521,6 +695,7 @@ void IfElseRegion::printRegionDAG() {
       if (cw->isSkipableInst(&I)) continue;
       cw->printInstruction(&I);
     }
+    cw->emitPHIsForPredecessor(brBB);
     
     cw->Out << "  if (";
     if (negateCond) cw->Out << "!(";
@@ -546,6 +721,7 @@ void IfElseRegion::printRegionDAG() {
       if (cw->isSkipableInst(&I)) continue;
       cw->printInstruction(&I);
     }
+    cw->emitPHIsForPredecessor(brBB);
     
     cw->Out << "  if (";
     if (negateCond) cw->Out << "!(";
@@ -566,6 +742,7 @@ void IfElseRegion::printRegionDAG() {
       if (cw->isSkipableInst(&I)) continue;
       cw->printInstruction(&I);
     }
+    cw->emitPHIsForPredecessor(brBB);
     
     cw->Out << "  if (";
     if (negateCond) cw->Out << "!(";
@@ -612,6 +789,8 @@ void IfElseRegion::printRegionDAG() {
       continue;
     cw->printInstruction(&I);
   }
+  // Materialize successor PHI incoming values for this predecessor block.
+  cw->emitPHIsForPredecessor(brBB);
 
   // print If branch
   cw->Out << "  if (";
@@ -1176,7 +1355,16 @@ void LoopRegion::printDoWhileLoop() {
               case Instruction::FRem: cw->Out << " % "; break;
               default: cw->Out << " /* unknown op */ "; break;
             }
-            cw->writeOperandInternal(binOp->getOperand(1));
+            Value *rhs = binOp->getOperand(1);
+            bool rhsNeedsParensForSub =
+                (binOp->getOpcode() == Instruction::Sub ||
+                 binOp->getOpcode() == Instruction::FSub) &&
+                isa<BinaryOperator>(rhs);
+            if (rhsNeedsParensForSub)
+              cw->Out << "(";
+            cw->writeOperandInternal(rhs);
+            if (rhsNeedsParensForSub)
+              cw->Out << ")";
             errs() << "ANDREW: Expanded BinaryOp for PHI update: " << *binOp << "\n";
           } else {
             // For non-BinaryOperator, use standard operand writing
@@ -1425,6 +1613,17 @@ void LoopRegion::printWhileLoop() {
                      << " = " << *incomingVal << "\n";
               break;
             }
+            // Emit explicit step update to avoid name-coalescing turning
+            // "x = x + 1" into "x = x" for IV-like carries.
+            cw->Out << "  " << phiName << " = " << phiName;
+            if (binOp->getOpcode() == Instruction::Sub ||
+                binOp->getOpcode() == Instruction::FSub)
+              cw->Out << " - 1;\n";
+            else
+              cw->Out << " + 1;\n";
+            errs() << "ANDREW: Emitting explicit while PHI step: " << phiName
+                   << "\n";
+            break;
           }
           // Emit: phi_name = incoming_value;
           // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
@@ -1540,12 +1739,10 @@ void LoopRegion::printWhileLoopWithContinue() {
   cw->Out << "while (";
   if (condInst) {
     if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
-      // Get the proper variable name for the loop condition
-      Value *op0 = condInst->getOperand(0);
-      // If op0 is a PHI from condBlock, use the proper name
-      cw->Out << cw->GetValueName(op0);
+      // Keep icmp operand signedness consistent with predicate semantics.
+      cw->writeOperandWithCast(condInst->getOperand(0), *icmp);
       cw->printCmpOperator(icmp, negateCondition);
-      cw->writeOperandInternal(condInst->getOperand(1));
+      cw->writeOperandWithCast(condInst->getOperand(1), *icmp);
     } else {
       cw->writeOperand(condInst, cw->ContextCasted);
     }
@@ -1813,6 +2010,8 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
 CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
                                          BasicBlock *entryBB, BasicBlock *endBB) {
   CBERegion2 *R = nullptr;
+  if (!entryBB)
+    return nullptr;
   // Backedge detection: if entryBB is the header of any ancestor loop region, stop recursion.
   CBERegion2 *ancestor = parentR;
   while (ancestor) {
@@ -1851,6 +2050,22 @@ CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
              << parentBB->getParent()->getName() << "::" << parentBB->getName()
              << "\n";
   }
+
+  // Cycle guard: block only recursive re-entry of the same (parent region, entry).
+  // Unlike global deduplication, this only suppresses currently-active recursion paths.
+  BasicBlock *parentEntryBB = parentR ? parentR->getEntryBlock() : nullptr;
+  std::pair<BasicBlock*, BasicBlock*> activeKey = {parentEntryBB, entryBB};
+  bool activeInserted = false;
+  if (parentR) {
+    activeInserted = activeCreateSubregions.insert(activeKey).second;
+    if (!activeInserted) {
+      errs() << "ANDREW: CBERegion: detected active recursive subregion request from "
+             << parentEntryBB->getName() << " to " << entryBB->getName()
+             << ", pruning cywcle\n";
+      return nullptr;
+    }
+  }
+
   switch (whichRegion(entryBB, LI)) {
   case 0: {
     errs() << "SUSAN: block is a linear region! " << entryBB->getName() << "\n";
@@ -1869,6 +2084,8 @@ CBERegion2 *CBERegion2::createSubRegions(CBERegion2 *parentR,
     break;
   }
   }
+  if (activeInserted)
+    activeCreateSubregions.erase(activeKey);
   return R;
 }
 

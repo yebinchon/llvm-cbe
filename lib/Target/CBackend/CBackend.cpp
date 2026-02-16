@@ -364,6 +364,96 @@ bool CWriter::isInlinableInst(Instruction &I) const {
   return I.getParent() == cast<Instruction>(I.user_back())->getParent();
 }
 
+bool CWriter::isAtomicAddLoweringCandidate(Instruction *I) const {
+  if (!I)
+    return false;
+
+  if (I->getMetadata("tulip.atomic.add"))
+    return true;
+
+  // Fallback path while benchmarks are being migrated to metadata tagging.
+  if (CallInst *CI = dyn_cast<CallInst>(I))
+    if (Function *F = CI->getCalledFunction())
+      if (F->getName().contains("atomicAdd"))
+        return true;
+
+  if (AtomicRMWInst *RMW = dyn_cast<AtomicRMWInst>(I))
+    return RMW->getOperation() == AtomicRMWInst::Add ||
+           RMW->getOperation() == AtomicRMWInst::FAdd;
+
+  return false;
+}
+
+bool CWriter::emitOpenMPAtomicForInst(Instruction *I) {
+  if (!isAtomicAddLoweringCandidate(I))
+    return false;
+
+  Value *Ptr = nullptr;
+  Value *Val = nullptr;
+  bool resultUsed = !I->user_empty() && !isEmptyType(I->getType());
+
+  if (CallInst *CI = dyn_cast<CallInst>(I)) {
+    if (CI->arg_size() < 2)
+      return false;
+    Ptr = CI->getArgOperand(0);
+    Val = CI->getArgOperand(1);
+  } else if (AtomicRMWInst *RMW = dyn_cast<AtomicRMWInst>(I)) {
+    if (!(RMW->getOperation() == AtomicRMWInst::Add ||
+          RMW->getOperation() == AtomicRMWInst::FAdd))
+      return false;
+    Ptr = RMW->getPointerOperand();
+    Val = RMW->getValOperand();
+  } else {
+    return false;
+  }
+
+  if (!Ptr || !Val)
+    return false;
+
+  auto printAtomicLHS = [&]() {
+    Out << "*(";
+    writeOperand(Ptr, ContextCasted);
+    Out << ")";
+  };
+
+  if (resultUsed) {
+    auto varName = GetValueName(I);
+    if (declaredLocals.find(varName) == declaredLocals.end() &&
+        omp_declaredLocals.find(varName) == omp_declaredLocals.end()) {
+      auto declName = GetValueName(I, true);
+      printTypeName(Out, I->getType(), false) << ' ';
+      Out << declName << ";\n";
+      if (!IS_OPENMP_FUNCTION)
+        declaredLocals.insert(declName);
+      else
+        omp_declaredLocals.insert(declName);
+      nameDict.LocalVars[demangleFunctionName(I->getFunction()->getName())]
+          .insert(declName);
+    }
+
+    Out << "  #pragma omp atomic capture\n";
+    Out << "  {\n";
+    Out << "    " << varName << " = ";
+    printAtomicLHS();
+    Out << ";\n";
+    Out << "    ";
+    printAtomicLHS();
+    Out << " = " << varName << " + ";
+    writeOperand(Val, ContextCasted);
+    Out << ";\n";
+    Out << "  }\n";
+  } else {
+    Out << "  #pragma omp atomic update\n";
+    Out << "  ";
+    printAtomicLHS();
+    Out << " += ";
+    writeOperand(Val, ContextCasted);
+    Out << ";\n";
+  }
+
+  return true;
+}
+
 // isDirectAlloca - Define fixed sized allocas in the entry block as direct
 // variables which are accessed with the & operator.  This causes GCC to
 // generate significantly better code than to emit alloca calls directly.
@@ -686,14 +776,6 @@ int CBERegion2::whichRegion(BasicBlock *entryBB, LoopInfo *LI) {
       // special case: do-while loop latch, not if-else
       if(L && L->getLoopLatch() == entryBB)
         return 0;
-      // special case: rotated while-with-continue condition block
-      // keep this in loop-structured handling, not generic if-else.
-      if (L) {
-        BasicBlock *header = L->getHeader();
-        if (BranchInst *headerBr = dyn_cast<BranchInst>(header->getTerminator()))
-          if (headerBr->isUnconditional() && headerBr->getSuccessor(0) == entryBB)
-            return 0;
-      }
       return 1;
     }
 
@@ -1124,6 +1206,16 @@ void CWriter::preprossesPHIs2Print(Function &F) {
     return false;
   };
 
+  auto isLoopIVOrRelated = [this](Value *V) -> bool {
+    if (!V)
+      return false;
+    if (PHINode *phi = dyn_cast<PHINode>(V))
+      return isInductionVariable(phi) || isExtraInductionVariable(phi);
+    if (Instruction *inst = dyn_cast<Instruction>(V))
+      return isIVIncrement(inst) || isExtraIVIncrement(inst);
+    return false;
+  };
+
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I)
     if (PHINode *phi = dyn_cast<PHINode>(&*I)) {
 
@@ -1132,20 +1224,21 @@ void CWriter::preprossesPHIs2Print(Function &F) {
       LoadInst *ldInst = nullptr;
       StoreInst *stInst = nullptr;
 
-      if (isInductionVariable(phi))
-      {
-        errs() << "YEBIN: this is an iv: " << *phi << "\n";
+      // For canonical for-loops, IV initialization is emitted in loop syntax.
+      // For while-style loops we still need PHI materialization (e.g. lg = 1).
+      Loop *phiLoop = LI->getLoopFor(phi->getParent());
+      LoopProfile *phiLP = phiLoop ? findLoopProfile(phiLoop) : nullptr;
+      bool isLoopIV = isInductionVariable(phi);
+      bool isLoopExtraIV = isExtraInductionVariable(phi);
+      if (phiLP && phiLP->isForLoop && (isLoopIV || isLoopExtraIV)) {
+        errs() << "ANDREW: skipping loop IV PHI materialization for for-loop: "
+               << *phi << "\n";
         continue;
       }
-      if (isExtraInductionVariable(phi))
-       {
-        errs() << "YEBIN: this is an extra iv: " << *phi << "\n";
-        continue;
-       }
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         BasicBlock *predBB = phi->getIncomingBlock(i);
         Value *phiVal = phi->getIncomingValue(i);
-        if (isa<Constant>(phiVal) || isa<LoadInst>(phiVal)) {
+        if (!isa<UndefValue>(phiVal) && !isEmptyType(phi->getType())) {
           bool skipStderr = false;
           if (LoadInst *ld = dyn_cast<LoadInst>(phiVal))
             if (ld->getPointerOperand()->getName() == "stderr") {
@@ -1155,6 +1248,8 @@ void CWriter::preprossesPHIs2Print(Function &F) {
           if (!skipStderr) {
             errs() << "YEBIN: PHI to print: " << *phi << "\n";
             errs() << "     from predBB: " << predBB->getName() << "\n";
+            errs() << "CBE_DEBUG: incoming value for PHI print: " << *phiVal
+                   << "\n";
             PHIValues2Print.insert(std::make_pair(predBB, phi));
           }
         }
@@ -1175,6 +1270,18 @@ void CWriter::preprossesPHIs2Print(Function &F) {
           replaceVal = phiLoops[phi];
         }
 
+        // Keep loop IVs and extra IVs distinct. Collapsing these via
+        // InstsToReplaceByPhi can rewrite loop-carried variables (e.g. nza)
+        // into a different IV (e.g. k), corrupting indexed assignments.
+        if (isLoopIVOrRelated(phiVal) || isLoopIVOrRelated(replaceVal)) {
+          errs() << "ANDREW: SKIPPING IV-related PHI coalescing: " << *phiVal
+                 << " -> " << *replaceVal;
+          if (Loop *phiLoop = LI->getLoopFor(phi->getParent()))
+            errs() << " in loop " << phiLoop->getHeader()->getName();
+          errs() << "\n";
+          continue;
+        }
+
         if (Instruction *incomingInst = dyn_cast<Instruction>(phiVal)) {
           // ANDREW: Skip coalescing for loop-carried PHI values where the 
           // incoming instruction is computed inside the same loop.
@@ -1191,6 +1298,11 @@ void CWriter::preprossesPHIs2Print(Function &F) {
           if (deleteAndReplaceInsts.find(incomingInst) !=
               deleteAndReplaceInsts.end()) {
             Value *keyVal = deleteAndReplaceInsts[incomingInst];
+            if (isLoopIVOrRelated(keyVal)) {
+              errs() << "ANDREW: SKIPPING IV-related deleteInst mapping: "
+                     << *keyVal << " -> " << *replaceVal << "\n";
+              continue;
+            }
             // Only add mapping if it doesn't create a cycle
             if (!wouldCreateCycle(keyVal, replaceVal)) {
               errs() << "YEBIN: replacing PHI deleteInsts: " << *keyVal
@@ -1827,6 +1939,8 @@ void CWriter::preprocessSkippableInsts(Function &F) {
 void CWriter::EliminateDeadInsts(Function &F) {
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
     Instruction *inst = &*I;
+    if (isAtomicAddLoweringCandidate(inst))
+      continue;
 
     if (CallInst *CI = dyn_cast<CallInst>(inst)) {
       errs() << "SUSAN: CI at 1400: " << *CI << "\n";
@@ -1908,6 +2022,8 @@ void CWriter::EliminateDeadInsts(Function &F) {
 
     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
       Instruction *inst = &*I;
+      if (isAtomicAddLoweringCandidate(inst))
+        continue;
 
       bool isLoopLiveIn = false;
       for (auto [loop, liveins] : omp_liveins)
@@ -4128,10 +4244,15 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
     return;
   }
 
-  if (isExtraInductionVariable(Operand)) {
+  // Keep extra induction variables as distinct symbols in regular loop code.
+  // The old remap to main IV (via IVMap) can collapse indices like nza -> k.
+  // Restrict this remap to OpenMP-specific paths where it was originally useful.
+  if (isExtraInductionVariable(Operand) && IS_OPENMP_FUNCTION) {
     PHINode *phi = dyn_cast<PHINode>(Operand);
     for (auto [iv, relatedIVs] : IVMap)
       if (relatedIVs.find(phi) != relatedIVs.end()) {
+        writeOperandInternal(iv);
+
         Value *offset = nullptr;
         for (auto LP : LoopProfiles) {
           if (LP->IV == iv) {
@@ -4166,16 +4287,15 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
             }
           }
         }
-        if (offset) {
-          writeOperandInternal(iv);
-          Out << " + ";
+
+        if (offset)
           writeOperandInternal(offset);
-          return;
-        }
-        // ANDREW: If we cannot recover a valid offset, do not collapse this
-        // related IV to the main IV; fall through and print the original value.
-        errs() << "ANDREW: preserving related IV without offset: " << *phi << "\n";
+        return;
       }
+  }
+  if (isExtraInductionVariable(Operand) && !IS_OPENMP_FUNCTION) {
+    errs() << "ANDREW: preserving extra IV in non-OpenMP path: " << *Operand
+           << "\n";
   }
 
   if (Instruction *I = dyn_cast<Instruction>(Operand))
@@ -4233,7 +4353,25 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
     return;
   }
 
-  if (InstsToReplaceByPhi.find(Operand) != InstsToReplaceByPhi.end()) {
+  auto isLoopIVOrRelated = [this](Value *V) -> bool {
+    if (!V)
+      return false;
+    if (PHINode *phi = dyn_cast<PHINode>(V))
+      return isInductionVariable(phi) || isExtraInductionVariable(phi);
+    if (Instruction *inst = dyn_cast<Instruction>(V))
+      return isIVIncrement(inst) || isExtraIVIncrement(inst);
+    return false;
+  };
+
+  if (isLoopIVOrRelated(Operand)) {
+    errs() << "ANDREW: writeOperand preserving IV-related operand: " << *Operand;
+    if (CurLoop)
+      errs() << " in loop " << CurLoop->getHeader()->getName();
+    errs() << "\n";
+  }
+
+  if (!isLoopIVOrRelated(Operand) &&
+      InstsToReplaceByPhi.find(Operand) != InstsToReplaceByPhi.end()) {
     // Follow the replacement chain iteratively with cycle detection as a safety net
     std::set<Value*> Visited;
     Value *Current = Operand;
@@ -4245,15 +4383,19 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
             errs() << "WARNING: Cycle detected in InstsToReplaceByPhi at: " << *Current << "\n";
             break;
         }
-        Current = InstsToReplaceByPhi[Current];
+        Value *Next = InstsToReplaceByPhi[Current];
+        if (isLoopIVOrRelated(Current) || isLoopIVOrRelated(Next)) {
+          errs() << "ANDREW: preserving IV-related operand mapping: " << *Current
+                 << " -> " << *Next << "\n";
+          break;
+        }
+        Current = Next;
     }
     
     // Current is now the final replacement (or a cycle representative)
     // Update Operand and continue with the rest of writeOperand
-    if (Current != Operand)
-      errs() << "ANDREW: writeOperand PHI substitution: " << *Operand
-             << " -> " << *Current << "\n";
-    Operand = Current;
+    if (!isLoopIVOrRelated(Current))
+      Operand = Current;
   }
 
 
@@ -4961,6 +5103,8 @@ void CWriter::findOMPFunctions(Module &M) {
   /*
    * OpenMP: search for openmp functions
    */
+  ompFuncs.clear();
+  std::set<std::string> ompThreadQueryFuncs;
   for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
     Function *F = &*FI;
     for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
@@ -4979,9 +5123,27 @@ void CWriter::findOMPFunctions(Module &M) {
 
           errs() << "SUSAN: adding utask" << *utask << "\n";
           ompFuncs[callInst] = utask;
+        } else if (F->getName() == "omp_get_thread_num" ||
+                   F->getName() == "omp_get_num_threads") {
+          ompThreadQueryFuncs.insert(callInst->getFunction()->getName().str());
         }
       }
     }
+  }
+
+  if (ompFuncs.empty() && !ompThreadQueryFuncs.empty()) {
+    errs() << "CBackend warning: found OpenMP thread-query calls without "
+              "canonical __kmpc_fork_call in module. Parallel regions may have "
+              "been flattened before C backend.\n";
+    errs() << "CBackend warning: affected function(s): ";
+    bool first = true;
+    for (const auto &funcName : ompThreadQueryFuncs) {
+      if (!first)
+        errs() << ", ";
+      errs() << funcName;
+      first = false;
+    }
+    errs() << "\n";
   }
 
   // delete argInput in a struct
@@ -5162,6 +5324,9 @@ void CWriter::generateHeader(Module &M) {
     }
   }
 
+  // Intrinsic helper emission can request llvmBitCastUnion after this point,
+  // so keep the typedef available in generated C unconditionally.
+  headerUseBitCastUnion();
   printModuleTypes(Out);
 
   // Global variable declarations...
@@ -5387,7 +5552,13 @@ void CWriter::generateHeader(Module &M) {
 
       // ANDREW: ptx specific
       case Intrinsic::nvvm_mul24_i:
-        errs() << "ANDREW: Intrinsic: ptx mul24 hit\n";
+      case Intrinsic::nvvm_fma_rn_d:
+      case Intrinsic::nvvm_add_rn_d:
+      case Intrinsic::nvvm_mul_rn_d:
+      case Intrinsic::nvvm_lohi_i2d:
+      case Intrinsic::nvvm_d2i_hi:
+      case Intrinsic::nvvm_d2i_lo:
+        errs() << "ANDREW: Intrinsic: ptx helper hit\n";
         intrinsicsToDefine.push_back(&*I);
         continue;
       }
@@ -6245,7 +6416,7 @@ void CWriter::generateHeader(Module &M) {
       if (isEmptyType(ElTy))
         continue;
       if (STy)
-        Out << "\n  r.field" << i << " = x" << i << ";";
+        Out << "\n  r." << getFieldName(STy) << i << " = x" << i << ";";
       else if (ATy)
         Out << "\n  r.array[" << i << "] = x" << i << ";";
       else if (VTy)
@@ -7184,6 +7355,8 @@ void CWriter::printFunction(Function &F, bool inlineF) {
             } else if (Instruction *valInst = dyn_cast<Instruction>(valV)) {
               if (isa<TruncInst>(valInst) || isa<BitCastInst>(valInst))
                 valInst = dyn_cast<Instruction>(valInst->getOperand(0));
+              if (!valInst)
+                continue;
 
               if (Var2IRs.find(varName) == Var2IRs.end())
                 Var2IRs[varName] = std::set<Value *>();
@@ -7664,18 +7837,53 @@ void CWriter::printCmpOperator(ICmpInst *icmp, bool negateCondition) {
 }
 
 void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
-  if (I->getMetadata("tulip.target.end.of.map"))
-    return;
-  if (I->getMetadata("tulip.target.start.of.map"))
-    return;
+  auto extractMappedPtrStorage = [](Value *V) -> Value * {
+    Value *Cur = V;
+    while (Cur) {
+      if (auto *BC = dyn_cast<BitCastInst>(Cur)) {
+        Cur = BC->getOperand(0);
+        continue;
+      }
+      if (auto *BC = dyn_cast<BitCastOperator>(Cur)) {
+        Cur = BC->getOperand(0);
+        continue;
+      }
+      if (auto *LI = dyn_cast<LoadInst>(Cur))
+        return LI->getPointerOperand();
+      return Cur;
+    }
+    return nullptr;
+  };
   if (CallInst *CI = dyn_cast<CallInst>(I)) {
-    if (CI->getCalledFunction()->getName() == "cudaMemcpy") {
+    if (I->getMetadata("tulip.target.start.of.map") ||
+        I->getMetadata("tulip.target.end.of.map")) {
+      Out << "  /* tulip map marker lowered */\n";
+      Function *Called = CI->getCalledFunction();
+      if (Called && Called->getName().contains("cudaMemcpy") &&
+          CI->arg_size() >= 4) {
+        if (auto *Mode = dyn_cast<ConstantInt>(CI->getArgOperand(3))) {
+          Value *DstStorage = extractMappedPtrStorage(CI->getArgOperand(0));
+          Value *SrcStorage = extractMappedPtrStorage(CI->getArgOperand(1));
+          if (DstStorage && SrcStorage) {
+            Out << "  " << GetValueName(DstStorage) << " = " << GetValueName(SrcStorage)
+                << "; /* map mode " << Mode->getSExtValue() << " */\n";
+          }
+        }
+      }
+      return;
+    }
+  }
+  if (CallInst *CI = dyn_cast<CallInst>(I)) {
+    Function *Called = CI->getCalledFunction();
+    if (Called && Called->getName().contains("cudaMemcpy")) {
       return;
     }
   }
   if (omp_SkipVals.find(I) != omp_SkipVals.end())
     return;
   if (deadInsts.find(I) != deadInsts.end())
+    return;
+  if (emitOpenMPAtomicForInst(I))
     return;
   Out << "  ";
   if (!(&*I)->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I)) {
@@ -7863,7 +8071,26 @@ void CWriter::printPHIsIfNecessary(BasicBlock *BB) {
       PHINode *phi = bb2phi.second;
       if (deadInsts.find(phi) != deadInsts.end())
         continue;
+      Value *incomingVal = phi->getIncomingValueForBlock(BB);
+      errs() << "CBE_DEBUG: emitting PHI copy from pred "
+             << BB->getParent()->getName() << "::" << BB->getName()
+             << " to phi " << *phi << "\n";
       auto varName = GetValueName(phi);
+      if (incomingVal == phi) {
+        errs() << "CBE_DEBUG: skipping self PHI copy for "
+               << BB->getParent()->getName() << "::" << BB->getName()
+               << " var=" << varName << "\n";
+        continue;
+      }
+      if (isa<Instruction>(incomingVal) || isa<Argument>(incomingVal)) {
+        auto incomingName = GetValueName(incomingVal);
+        if (!incomingName.empty() && incomingName == varName) {
+          errs() << "CBE_DEBUG: skipping no-op PHI copy for "
+                 << BB->getParent()->getName() << "::" << BB->getName()
+                 << " var=" << varName << "\n";
+          continue;
+        }
+      }
       Out << std::string(2, ' ');
       if (declaredLocals.find(varName) == declaredLocals.end() &&
           omp_declaredLocals.find(varName) == omp_declaredLocals.end()) {
@@ -7882,10 +8109,16 @@ void CWriter::printPHIsIfNecessary(BasicBlock *BB) {
         errs() << "YEBIN: PRINT CUDA INDVAR\n";
         Out << "blockDim.x * blockIdx.x + threadIdx.x + ";
       }
-      writeOperandInternal(phi->getIncomingValueForBlock(BB));
+      errs() << "CBE_DEBUG: PHI incoming value: "
+             << *incomingVal << "\n";
+      writeOperandInternal(incomingVal);
       Out << ";\n";
     }
   }
+}
+
+void CWriter::emitPHIsForPredecessor(BasicBlock *BB) {
+  printPHIsIfNecessary(BB);
 }
 
 void CWriter::searchForBlocksToSkip(Loop *L,
@@ -8004,6 +8237,8 @@ bool is_number(const std::string &s) {
 bool CWriter::isSkipableInst(Instruction *inst) {
   // if(noneSkipAllocaInsts.find(inst) != noneSkipAllocaInsts.end())return
   // false;
+  if (isAtomicAddLoweringCandidate(inst))
+    return false;
   if (omp_SkipVals.find(inst) != omp_SkipVals.end())
     return true;
   // if(skipInstsForPhis.find(inst) != skipInstsForPhis.end()) return true;
@@ -8102,14 +8337,12 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
   // Output all of the instructions in the basic block...
   for (BasicBlock::iterator II = BB->begin(), E = --BB->end(); II != E; ++II) {
     Instruction *inst = &*II;
-    if (inst->getMetadata("tulip.target.start.of.map"))
-      continue;
-    if (inst->getMetadata("tulip.target.end.of.map"))
-      continue;
     if (isSkipableInst(inst)) {
       errs() << "Skipping inst " << *inst << "\n";
       continue;
     }
+    if (emitOpenMPAtomicForInst(inst))
+      continue;
 
     /*
      * OpenMP: translate omp master
@@ -8892,6 +9125,15 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
           assert(0 && "SUSAN: op1Ty unimplemented cast?\n");
         writeOperand(I.getOperand(1), ContextCasted);
       } else if (opcode == Instruction::Sub || opcode == Instruction::FSub) {
+        auto writeSubOperand1 = [&](Value *V) {
+          bool needsParens =
+              isa<Instruction>(V) && isInlinableInst(*cast<Instruction>(V));
+          if (needsParens)
+            Out << "(";
+          writeOperand(V, ContextCasted);
+          if (needsParens)
+            Out << ")";
+        };
         if (ConstantInt *opnd0 = dyn_cast<ConstantInt>(I.getOperand(0))) {
           if (ConstantInt *opnd1 = dyn_cast<ConstantInt>(I.getOperand(1)))
             Out << (opnd0->getSExtValue() - opnd1->getSExtValue());
@@ -8900,7 +9142,7 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
               Out << "(";
             writeOperand(I.getOperand(0), ContextCasted);
             Out << " - ";
-            writeOperand(I.getOperand(1), ContextCasted);
+            writeSubOperand1(I.getOperand(1));
             if (addParenthesis.find(&I) != addParenthesis.end())
               Out << ")";
           }
@@ -8908,7 +9150,7 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
           Out << "(";
           writeOperand(I.getOperand(0), ContextCasted);
           Out << " - ";
-          writeOperand(I.getOperand(1), ContextCasted);
+          writeSubOperand1(I.getOperand(1));
           Out << ")";
         }
       } else if (opcode == Instruction::UDiv || opcode == Instruction::FDiv) {
@@ -9090,7 +9332,16 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
       errorWithMessage("invalid operator type");
     }
 
+    bool rhsNeedsParensForSub =
+        (I.getOpcode() == Instruction::Sub ||
+         I.getOpcode() == Instruction::FSub) &&
+        isa<Instruction>(I.getOperand(1)) &&
+        isInlinableInst(*cast<Instruction>(I.getOperand(1)));
+    if (rhsNeedsParensForSub)
+      Out << "(";
     writeOperandWithCast(I.getOperand(1), I.getOpcode());
+    if (rhsNeedsParensForSub)
+      Out << ")";
     if (I.getOpcode() == Instruction::Add ||
         I.getOpcode() == Instruction::FAdd ||
         I.getOpcode() == Instruction::Mul ||
@@ -9214,11 +9465,15 @@ void CWriter::visitCastInst(CastInst &I) {
     }
   }
   if (isa<SIToFPInst>(&I)) {
-    Out << '(';
+    // Preserve signed integer semantics for sitofp even when the underlying C
+    // variable was declared unsigned.
+    Out << "((";
     printTypeName(Out, DstTy);
-    Out << ")(";
-    writeOperand(I.getOperand(0), ContextCasted);
+    Out << ")((";
+    printSimpleType(Out, SrcTy, true);
     Out << ")";
+    writeOperand(I.getOperand(0), ContextCasted);
+    Out << "))";
     return;
   }
   // skip translating this cast if not needed
@@ -9413,6 +9668,28 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
       }
       Out << ");\n";
     }
+  } else if (Opcode == Intrinsic::nvvm_d2i_hi ||
+             Opcode == Intrinsic::nvvm_d2i_lo) {
+    // nvvm_d2i_{hi,lo} extract the upper/lower 32 bits of a double's bit
+    // representation.
+    cwriter_assert(numParams == 1);
+    cwriter_assert(retT->isIntegerTy(32) && elemT->isDoubleTy());
+    headerUseBitCastUnion();
+    Out << "  llvmBitCastUnion bc;\n";
+    Out << "  bc.Double = a;\n";
+    if (Opcode == Intrinsic::nvvm_d2i_hi)
+      Out << "  r = (uint32_t)(bc.Int64 >> 32);\n";
+    else
+      Out << "  r = (uint32_t)(bc.Int64 & UINT64_C(0xFFFFFFFF));\n";
+  } else if (Opcode == Intrinsic::nvvm_lohi_i2d) {
+    // nvvm_lohi_i2d assembles a double from low/high 32-bit words.
+    cwriter_assert(numParams == 2);
+    cwriter_assert(retT->isDoubleTy() && elemT->isIntegerTy(32) &&
+                   funT->getParamType(1)->isIntegerTy(32));
+    headerUseBitCastUnion();
+    Out << "  llvmBitCastUnion bc;\n";
+    Out << "  bc.Int64 = ((uint64_t)(uint32_t)b << 32) | (uint64_t)(uint32_t)a;\n";
+    Out << "  r = bc.Double;\n";
   } else if (elemIntT) {
     // handle integer ops
     cwriter_assert(isSupportedIntegerSize(*elemIntT) &&
@@ -9553,12 +9830,20 @@ void CWriter::printIntrinsicDefinition(FunctionType *funT, unsigned Opcode,
       break;
 
     case Intrinsic::fma:
+    case Intrinsic::nvvm_fma_rn_d:
       headerUseMath();
       Out << "  r = fma" << suffix << "(a, b, c);\n";
       break;
 
     case Intrinsic::fmuladd:
       Out << "  r = a * b + c;\n";
+      break;
+
+    case Intrinsic::nvvm_mul_rn_d:
+      Out << "  r = a * b;\n";
+      break;
+    case Intrinsic::nvvm_add_rn_d:
+      Out << "  r = a + b;\n";
       break;
 
     case Intrinsic::pow:
@@ -9649,6 +9934,12 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::dbg_value:
           case Intrinsic::dbg_declare:
           case Intrinsic::nvvm_mul24_i:
+          case Intrinsic::nvvm_fma_rn_d:
+          case Intrinsic::nvvm_add_rn_d:
+          case Intrinsic::nvvm_mul_rn_d:
+          case Intrinsic::nvvm_lohi_i2d:
+          case Intrinsic::nvvm_d2i_hi:
+          case Intrinsic::nvvm_d2i_lo:
           case Intrinsic::nvvm_barrier0:
           case Intrinsic::nvvm_fabs_d:
           case Intrinsic::nvvm_fabs_f:
@@ -10158,6 +10449,16 @@ void CWriter::visitCallInst(CallInst &I) {
   if (Function *F = I.getCalledFunction())
     if (F->getName() == "__kmpc_barrier")
       return;
+
+  // Runtime memcpy calls should be lowered/erased in Tulip passes and
+  // must not leak into emitted C.
+  if (Function *F = I.getCalledFunction())
+    if (F->getName().contains("cudaMemcpy"))
+      return;
+
+  if (I.getMetadata("tulip.target.mapdata.to") ||
+      I.getMetadata("tulip.target.mapdata.from")) {
+  }
 
   if (I.getMetadata("tulip.kernel.region.begin")) {
     for (auto devVar : DevVarDecls) {
@@ -10710,6 +11011,12 @@ bool CWriter::visitBuiltinCall(CallInst &I, Intrinsic::ID ID) {
   case Intrinsic::trap:
   case Intrinsic::trunc:
   case Intrinsic::nvvm_mul24_i:
+  case Intrinsic::nvvm_fma_rn_d:
+  case Intrinsic::nvvm_add_rn_d:
+  case Intrinsic::nvvm_mul_rn_d:
+  case Intrinsic::nvvm_lohi_i2d:
+  case Intrinsic::nvvm_d2i_hi:
+  case Intrinsic::nvvm_d2i_lo:
     return false; // these use the normal function call emission
   case Intrinsic::nvvm_fabs_d:
     Out << "fabs(";
@@ -10851,8 +11158,12 @@ void CWriter::visitInlineAsm(CallInst &CI) {
       C = "&" + C;
 
     Out << "\"=" << C << "\"(" << GetValueName(DestVal);
-    if (DestValNo != -1)
-      Out << ".field" << DestValNo; // Multiple retvals.
+    if (DestValNo != -1) {
+      if (StructType *ST = dyn_cast<StructType>(DestVal->getType()))
+        Out << "." << getFieldName(ST) << DestValNo; // Multiple retvals.
+      else
+        Out << ".field" << DestValNo; // Fallback for unexpected non-struct.
+    }
     Out << ")";
     ++ValueCount;
   }
@@ -11035,8 +11346,19 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
       gepInst = dyn_cast<GetElementPtrInst>(gepInst->getPointerOperand());
     }*/
 
-    if (dereferenced)
+    // In load contexts, the GEP already denotes the address to dereference;
+    // emitting an extra '&' turns value loads into address arithmetic.
+    if (dereferenced && !isa<LoadInst>(CurInstr))
       Out << '&';
+    if (dereferenced) {
+      errs() << "ANDREW: printGEPExpressionStruct dereferenced=true for Ptr=" << *Ptr
+             << ", CurInstr=";
+      if (CurInstr)
+        errs() << *CurInstr;
+      else
+        errs() << "<null>";
+      errs() << ", emitted_address_of=" << (!isa<LoadInst>(CurInstr)) << "\n";
+    }
   }
 
   std::set<Value *> NegOpnd;
@@ -11052,17 +11374,23 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
 
   Type *IntoT = I.getIndexedType();
   Value *FirstOp = I.getOperand();
-  auto writeGEPIndexOperand = [&](Value *IdxOp) {
-    if (Instruction *IdxInst = dyn_cast<Instruction>(IdxOp)) {
-      if (isa<BinaryOperator>(IdxInst) || isa<CastInst>(IdxInst) ||
-          isa<GetElementPtrInst>(IdxInst)) {
-        writeInstComputationInline(*IdxInst, true);
-        return;
-      }
-    }
-    writeOperandInternal(IdxOp);
-  };
-  if (printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)))
+  bool addAddressWrapper =
+      printReference && (isConstantNull(FirstOp) || isNegative(FirstOp));
+  if (IntoT->isIntegerTy() || IntoT->isPointerTy() ||
+      IntoT->isFloatingPointTy()) {
+    // Scalar/pointer GEP stepping already yields an address expression like
+    // "(base + idx)". Wrapping it in "&(...)" turns it into pointer-to-pointer
+    // and breaks loads/stores on shared-memory reductions.
+    addAddressWrapper = false;
+  }
+  if (ArrayType *ArrTy = dyn_cast<ArrayType>(IntoT)) {
+    // Shared-memory lowering uses [0 x T] as a carrier type. Wrapping
+    // "&(... + 0)" here takes address of a pointer rvalue and produces invalid
+    // C (e.g. '&(((double*)base)+0)'). Keep it as pointer arithmetic instead.
+    if (ArrTy->getNumElements() == 0)
+      addAddressWrapper = false;
+  }
+  if (addAddressWrapper)
     Out << "(&";
 
   bool currGEPisPointer = !(isa<GetElementPtrInst>(Ptr) ||
@@ -11089,12 +11417,12 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
             flattened3D = true;
           }
         }
-        writeGEPIndexOperand(FirstOp);
+        writeOperand(FirstOp);
         if (!flattened3D)
           Out << ')';
       } else {
         errs() << "SUSAN: found negative int" << *FirstOp << "\n";
-        writeGEPIndexOperand(FirstOp);
+        writeOperand(FirstOp);
         Out << ')';
       }
     } else {
@@ -11116,13 +11444,13 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
           Out << "*(";
           writeOperandInternal(Ptr, ContextNormal, false);
           Out << '+';
-          writeGEPIndexOperand(FirstOp);
+          writeOperand(FirstOp);
           Out << ')';
         } else {
           errs() << "SUSAN: writing ptr 9994: " << *Ptr << "\n";
           writeOperandInternal(Ptr, ContextNormal, false);
           Out << '[';
-          writeGEPIndexOperand(FirstOp);
+          writeOperand(FirstOp);
           Out << ']';
         }
         currGEPisPointer = false;
@@ -11130,7 +11458,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
         Out << '(';
         writeOperandInternal(Ptr, ContextNormal, false);
         Out << '+';
-        writeGEPIndexOperand(FirstOp);
+        writeOperand(FirstOp);
         Out << ')';
       }
     } else {
@@ -11140,7 +11468,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
         Out << '(';
         writeOperandInternal(Ptr, ContextNormal, false);
         Out << '+';
-        writeGEPIndexOperand(FirstOp);
+        writeOperand(FirstOp);
         Out << ')';
       } else {
         writeOperandInternal(Ptr, ContextNormal, false);
@@ -11165,15 +11493,22 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
   for (; I != E; ++I) {
     Value *Opnd = I.getOperand();
     if (isa<ArrayType>(prevType)) {
+      ArrayType *prevArrTy = cast<ArrayType>(prevType);
+      // Zero-length arrays are a pointer-arithmetic carrier in LLVM IR.
+      // A trailing [0] is a no-op and should not force value indexing in C.
+      if (prevArrTy->getNumElements() == 0 && isConstantNull(Opnd)) {
+        prevType = I.getIndexedType();
+        continue;
+      }
       if (accessMemory) {
         if (flattened3D) {
           Out << "+" << nextSize << "*";
-          writeGEPIndexOperand(Opnd);
+          writeOperand(Opnd);
           Out << ')';
           flattened3D = false;
         } else {
           Out << "[";
-          writeGEPIndexOperand(Opnd);
+          writeOperand(Opnd);
           Out << ']';
           isPointer = false;
         }
@@ -11182,7 +11517,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
           errs() << "SUSAN: 10062: " << *Opnd << "\n";
           currValue2DerefCnt.second--;
           Out << '[';
-          writeGEPIndexOperand(Opnd);
+          writeOperand(Opnd);
           Out << ']';
           isPointer = false;
         } else {
@@ -11223,7 +11558,7 @@ bool CWriter::printGEPExpressionStruct(Value *Ptr, gep_type_iterator I,
     prevType = I.getIndexedType();
   }
 
-  if (printReference && (isConstantNull(FirstOp) || isNegative(FirstOp)))
+  if (addAddressWrapper)
     Out << ")";
   return isPointer;
 
@@ -11426,8 +11761,11 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
                                 bool IsVolatile, unsigned Alignment /*bytes*/) {
 
   GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(Operand);
+  GEPOperator *gepOp = dyn_cast<GEPOperator>(Operand);
 
   if (gepInst) {
+    GetElementPtrInst *rootGEP = gepInst;
+    bool rootNeedsReference = false;
     errs() << "SUSAN: GEPINST: " << *gepInst << "\n";
     Value *UO = findUnderlyingObject(gepInst->getPointerOperand());
     int dereferenceTimes = Times2Dereference[UO];
@@ -11435,14 +11773,43 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     while (gepInst) {
       if (!dereferenceTimes) {
         GEPNeedsReference.insert(gepInst);
+        if (gepInst == rootGEP)
+          rootNeedsReference = true;
       }
 
       accessGEPMemory.insert(gepInst);
       gepInst = dyn_cast<GetElementPtrInst>(gepInst->getPointerOperand());
       dereferenceTimes--;
     }
+    if ((isa<LoadInst>(CurInstr) || isa<StoreInst>(CurInstr)) &&
+        rootNeedsReference) {
+      // For memory access through GEP we must emit an explicit dereference.
+      // Otherwise a GEP that prints as an address expression (e.g. '&field')
+      // leaks address syntax into scalar expressions or store LHS.
+      Out << "*(";
+      writeOperandInternal(Operand);
+      Out << ")";
+      accessGEPMemory.clear();
+      return;
+    }
+
     writeOperandInternal(Operand);
     accessGEPMemory.clear();
+    return;
+  }
+
+  if (gepOp) {
+    // ConstantExpr GEPs do not enter the GetElementPtrInst path above.
+    // If we fall through to the generic memory path, it prepends '*' and
+    // turns value expressions like "obj.field" into invalid "*(obj.field)".
+    // Handle GEPOperator directly to keep load/store scalar field access valid.
+    if (isa<StoreInst>(CurInstr)) {
+      Out << "*(";
+      writeOperandInternal(Operand);
+      Out << ")";
+      return;
+    }
+    writeOperandInternal(Operand);
     return;
   }
 
@@ -11544,9 +11911,18 @@ void CWriter::visitLoadInst(LoadInst &I) {
   // for omp inlining
   if (addressExposedLoads.find(&I) != addressExposedLoads.end()) {
     errs() << "SUSAN: printing inlined load: " << I << "\n";
-    return writeOperand(I.getPointerOperand());
+    // Keep pointer-typed loads in the fast path, but scalar loads must still
+    // go through writeMemoryAccess so they print as values, not addresses.
+    if (I.getType()->isPointerTy()) {
+      errs() << "ANDREW: addressExposedLoads fast-path kept pointer load: " << I
+             << "\n";
+      return writeOperand(I.getPointerOperand());
+    }
+    errs() << "ANDREW: addressExposedLoads bypassed for scalar load: " << I
+           << "\n";
   }
 
+  errs() << "ANDREW: visitLoadInst using writeMemoryAccess for: " << I << "\n";
   writeMemoryAccess(I.getOperand(0), I.getType(), I.isVolatile(),
                     I.getAlignment());
 }
@@ -11843,10 +12219,12 @@ void CWriter::visitInsertValueInst(InsertValueInst &IVI) {
     Type *IndexedTy = ExtractValueInst::getIndexedType(
         IVI.getOperand(0)->getType(), makeArrayRef(b, i));
     cwriter_assert(IndexedTy);
-    if (IndexedTy->isArrayTy())
+    if (IndexedTy->isArrayTy()) {
       Out << ".array[" << *i << "]";
-    else
-      Out << ".field" << *i;
+    } else {
+      cwriter_assert(isa<StructType>(IndexedTy));
+      Out << "." << getFieldName(cast<StructType>(IndexedTy)) << *i;
+    }
   }
   Out << " = ";
   writeOperand(IVI.getOperand(1), ContextCasted);
@@ -11866,10 +12244,12 @@ void CWriter::visitExtractValueInst(ExtractValueInst &EVI) {
          i != e; ++i) {
       Type *IndexedTy = ExtractValueInst::getIndexedType(
           EVI.getOperand(0)->getType(), makeArrayRef(b, i));
-      if (IndexedTy->isArrayTy())
+      if (IndexedTy->isArrayTy()) {
         Out << ".array[" << *i << "]";
-      else
-        Out << ".field" << *i;
+      } else {
+        cwriter_assert(isa<StructType>(IndexedTy));
+        Out << "." << getFieldName(cast<StructType>(IndexedTy)) << *i;
+      }
     }
   }
   Out << ")";

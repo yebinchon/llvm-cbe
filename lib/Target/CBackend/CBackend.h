@@ -120,6 +120,8 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   void findCondRelatedInsts(BasicBlock *skipBlock, std::set<Value*> &condRelatedInsts);
   bool isIVIncrement(Value* V);
   bool isInlinableInst(Instruction &I) const;
+  bool isAtomicAddLoweringCandidate(Instruction *I) const;
+  bool emitOpenMPAtomicForInst(Instruction *I);
   void printInstruction(Instruction *I, bool printSemiColon = true);
   PHINode* getInductionVariable(Loop *L);
   Instruction *getIVIncrement(Loop *L, PHINode* IV);
@@ -359,6 +361,7 @@ public:
   virtual bool doFinalization(Module &M);
   //virtual bool runOnFunction(Function &F);
   virtual bool runOnModule(Module &M);
+  void emitPHIsForPredecessor(BasicBlock *BB);
 
 private:
   void generateHeader(Module &M);
