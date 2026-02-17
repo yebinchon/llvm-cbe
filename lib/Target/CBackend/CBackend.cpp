@@ -416,6 +416,17 @@ bool CWriter::emitOpenMPAtomicForInst(Instruction *I) {
     Out << ")";
   };
 
+  auto isMinusOneInt = [&](Value *V) -> bool {
+    if (auto *CI = dyn_cast<ConstantInt>(V))
+      return CI->isMinusOne();
+    return false;
+  };
+  auto isOneInt = [&](Value *V) -> bool {
+    if (auto *CI = dyn_cast<ConstantInt>(V))
+      return CI->isOne();
+    return false;
+  };
+
   if (resultUsed) {
     auto varName = GetValueName(I);
     if (declaredLocals.find(varName) == declaredLocals.end() &&
@@ -431,17 +442,36 @@ bool CWriter::emitOpenMPAtomicForInst(Instruction *I) {
           .insert(declName);
     }
 
+    bool preferPostDecCapture =
+        I->getMetadata("tulip.atomic.capture.postdec") || isMinusOneInt(Val);
+    bool preferPostIncCapture =
+        I->getMetadata("tulip.atomic.capture.postinc") || isOneInt(Val);
+
     Out << "  #pragma omp atomic capture\n";
-    Out << "  {\n";
-    Out << "    " << varName << " = ";
-    printAtomicLHS();
-    Out << ";\n";
-    Out << "    ";
-    printAtomicLHS();
-    Out << " = " << varName << " + ";
-    writeOperand(Val, ContextCasted);
-    Out << ";\n";
-    Out << "  }\n";
+    if (preferPostDecCapture) {
+      // Emit a single capture expression to preserve "return old value then
+      // decrement" semantics for atomicAdd(ptr, -1)-style patterns.
+      Out << "  " << varName << " = (";
+      printAtomicLHS();
+      Out << ")--;\n";
+    } else if (preferPostIncCapture) {
+      // Emit a single capture expression to preserve "return old value then
+      // increment" semantics for atomicAdd(ptr, +1)-style patterns.
+      Out << "  " << varName << " = (";
+      printAtomicLHS();
+      Out << ")++;\n";
+    } else {
+      Out << "  {\n";
+      Out << "    " << varName << " = ";
+      printAtomicLHS();
+      Out << ";\n";
+      Out << "    ";
+      printAtomicLHS();
+      Out << " = " << varName << " + ";
+      writeOperand(Val, ContextCasted);
+      Out << ";\n";
+      Out << "  }\n";
+    }
   } else {
     Out << "  #pragma omp atomic update\n";
     Out << "  ";
@@ -7198,6 +7228,10 @@ void CWriter::DeclareLocalVariable(Instruction *I, bool &PrintedVar,
     isDeclared = true;
     nameDict.LocalVars[demangleFunctionName(I->getFunction()->getName())].insert(varName);
   } else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
+    // Let emitOpenMPAtomicForInst own declaration/type for atomic lowering.
+    if (isAtomicAddLoweringCandidate(I))
+      return;
+
     errs() << "YEBIN: WE ARE HERE FOR " << *I << "\n";
 
     ///*
@@ -7654,6 +7688,24 @@ void CWriter::printFunction(Function &F, bool inlineF) {
     Out << GetValueName(F.arg_begin()) << " = &StructReturn;\n";
   }
 
+  // Function arguments are already declared in the prototype; mark them so
+  // reconstructed debug names do not get emitted as duplicate locals.
+  int skipArgSteps = IS_OPENMP_FUNCTION ? 2 : 0;
+  bool skipStructRetArg = isStructReturn;
+  for (auto arg = F.arg_begin(); arg != F.arg_end(); ++arg) {
+    if (skipStructRetArg) {
+      skipStructRetArg = false;
+      continue;
+    }
+    if (skipArgSteps > 0) {
+      --skipArgSteps;
+      continue;
+    }
+    std::string argName = GetValueName(arg);
+    declaredLocals.insert(argName);
+    omp_declaredLocals.insert(argName);
+  }
+
   bool PrintedVar = false;
 
   /*
@@ -7857,7 +7909,6 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
   if (CallInst *CI = dyn_cast<CallInst>(I)) {
     if (I->getMetadata("tulip.target.start.of.map") ||
         I->getMetadata("tulip.target.end.of.map")) {
-      Out << "  /* tulip map marker lowered */\n";
       Function *Called = CI->getCalledFunction();
       if (Called && Called->getName().contains("cudaMemcpy") &&
           CI->arg_size() >= 4) {
@@ -7865,8 +7916,49 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
           Value *DstStorage = extractMappedPtrStorage(CI->getArgOperand(0));
           Value *SrcStorage = extractMappedPtrStorage(CI->getArgOperand(1));
           if (DstStorage && SrcStorage) {
-            Out << "  " << GetValueName(DstStorage) << " = " << GetValueName(SrcStorage)
-                << "; /* map mode " << Mode->getSExtValue() << " */\n";
+            Type *DstTy = DstStorage->getType();
+            Type *SrcTy = SrcStorage->getType();
+            int64_t mapMode = Mode->getSExtValue();
+            errs() << "ANDREW: map-lowering cudaMemcpy mode " << mapMode
+                   << " dst=" << *DstStorage << " src=" << *SrcStorage << "\n";
+            if (mapMode == 1) {
+              if (auto *DstGEP = dyn_cast<GetElementPtrInst>(DstStorage)) {
+                if (DstGEP->getPointerOperand() == SrcStorage) {
+                  errs() << "ANDREW: skipping self-copy map lowering: "
+                         << *CI << "\n";
+                  return;
+                }
+              }
+            }
+
+            bool emittedScalarMap = false;
+            if (auto *DstPtrTy = dyn_cast<PointerType>(DstTy)) {
+              if (auto *SrcPtrTy = dyn_cast<PointerType>(SrcTy)) {
+                Type *DstElemTy = DstPtrTy->getPointerElementType();
+                Type *SrcElemTy = SrcPtrTy->getPointerElementType();
+
+                // Scalar host<->device map lowering.
+                // mode 1 (H2D):  *dev_ptr = host_scalar
+                // mode 2 (D2H):  host_scalar = *dev_ptr
+                if (mapMode == 1 && DstElemTy == SrcTy && !SrcElemTy->isPointerTy()) {
+                  Out << "  *" << GetValueName(DstStorage) << " = "
+                      << GetValueName(SrcStorage);
+                  emittedScalarMap = true;
+                } else if (mapMode == 2 && SrcElemTy == DstTy &&
+                           !DstElemTy->isPointerTy()) {
+                  Out << "  " << GetValueName(DstStorage) << " = *"
+                      << GetValueName(SrcStorage);
+                  emittedScalarMap = true;
+                }
+              }
+            }
+
+            if (emittedScalarMap) {
+              Out << "; /* map mode " << Mode->getSExtValue() << " */\n";
+            } else {
+              errs() << "ANDREW: skipping non-scalar map-lowering: "
+                     << *CI << "\n";
+            }
           }
         }
       }
@@ -7876,6 +7968,45 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
   if (CallInst *CI = dyn_cast<CallInst>(I)) {
     Function *Called = CI->getCalledFunction();
     if (Called && Called->getName().contains("cudaMemcpy")) {
+      if (CI->arg_size() >= 4) {
+        if (auto *Mode = dyn_cast<ConstantInt>(CI->getArgOperand(3))) {
+          Value *DstStorage = extractMappedPtrStorage(CI->getArgOperand(0));
+          Value *SrcStorage = extractMappedPtrStorage(CI->getArgOperand(1));
+          if (DstStorage && SrcStorage) {
+            Type *DstTy = DstStorage->getType();
+            Type *SrcTy = SrcStorage->getType();
+            int64_t mapMode = Mode->getSExtValue();
+            if (auto *DstPtrTy = dyn_cast<PointerType>(DstTy)) {
+              if (auto *SrcPtrTy = dyn_cast<PointerType>(SrcTy)) {
+                Type *DstElemTy = DstPtrTy->getPointerElementType();
+                Type *SrcElemTy = SrcPtrTy->getPointerElementType();
+                if (mapMode == 1 && DstElemTy == SrcTy &&
+                    !SrcElemTy->isPointerTy()) {
+                  errs() << "ANDREW: fallback-lowering scalar cudaMemcpy mode 1 "
+                         << "dst=" << *DstStorage << " src=" << *SrcStorage
+                         << "\n";
+                  Out << "  *" << GetValueName(DstStorage) << " = "
+                      << GetValueName(SrcStorage)
+                      << "; /* scalar cudaMemcpy fallback mode 1 */\n";
+                  return;
+                }
+                if (mapMode == 2 && SrcElemTy == DstTy &&
+                    !DstElemTy->isPointerTy()) {
+                  errs() << "ANDREW: fallback-lowering scalar cudaMemcpy mode 2 "
+                         << "dst=" << *DstStorage << " src=" << *SrcStorage
+                         << "\n";
+                  Out << "  " << GetValueName(DstStorage) << " = *"
+                      << GetValueName(SrcStorage)
+                      << "; /* scalar cudaMemcpy fallback mode 2 */\n";
+                  return;
+                }
+              }
+            }
+            errs() << "ANDREW: dropping non-scalar cudaMemcpy in C emission: "
+                   << *CI << "\n";
+          }
+        }
+      }
       return;
     }
   }
@@ -8379,6 +8510,17 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
     if(isInlinableInst(*II)) errs() << *II << " is inlinable\n";
     if (!isInlinableInst(*II)) {
       errs() << "SUSAN: printing instruction " << *II << " at 6678\n";
+      if (CallInst *CI = dyn_cast<CallInst>(&*II)) {
+        if (Function *Called = CI->getCalledFunction()) {
+          if (Called->getName().contains("cudaMemcpy")) {
+            errs() << "ANDREW: printBasicBlock dispatching cudaMemcpy to "
+                      "printInstruction: "
+                   << *CI << "\n";
+            printInstruction(CI, true);
+            continue;
+          }
+        }
+      }
       if (!isEmptyType(II->getType()) || isa<StoreInst>(&*II))
         Out << "  ";
 

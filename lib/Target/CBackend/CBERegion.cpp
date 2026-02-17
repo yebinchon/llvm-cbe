@@ -749,19 +749,29 @@ void IfElseRegion::printRegionDAG() {
     cw->writeOperand(condInst, cw->ContextCasted);
     if (negateCond) cw->Out << ")";
     cw->Out << ") {\n";
-    // Handle return type properly - emit appropriate return value
-    Function *F = brBB->getParent();
-    Type *retTy = F->getReturnType();
-    if (retTy->isVoidTy()) {
-      cw->Out << "  return;\n";
-    } else if (retTy->isIntegerTy()) {
-      cw->Out << "  return 0;\n";
-    } else if (retTy->isFloatingPointTy()) {
-      cw->Out << "  return 0.0;\n";
-    } else if (retTy->isPointerTy()) {
-      cw->Out << "  return NULL;\n";
+    // Emit the actual return value from the exiting branch instead of a typed
+    // zero default. This preserves source semantics for early-return patterns.
+    BasicBlock *exitingStart = negateCond ? falseStartBB : trueStartBB;
+    BasicBlock *retBB = isExitingFunction(exitingStart);
+    ReturnInst *retInst =
+        retBB ? dyn_cast<ReturnInst>(retBB->getTerminator()) : nullptr;
+
+    if (retInst) {
+      if (retInst->getNumOperands() == 0) {
+        cw->Out << "  return;\n";
+      } else {
+        Value *retVal = retInst->getReturnValue();
+        if (auto *phi = dyn_cast<PHINode>(retVal)) {
+          int incomingIdx = phi->getBasicBlockIndex(exitingStart);
+          if (incomingIdx >= 0)
+            retVal = phi->getIncomingValue(incomingIdx);
+        }
+        cw->Out << "  return ";
+        cw->writeOperandInternal(retVal);
+        cw->Out << ";\n";
+      }
     } else {
-      // Fallback for other types
+      // Conservative fallback when the exit path is unreachable or malformed.
       cw->Out << "  return;\n";
     }
     cw->Out << "  }\n";
