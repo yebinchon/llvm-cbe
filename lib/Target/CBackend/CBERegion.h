@@ -35,6 +35,7 @@
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Transforms/Scalar.h"
 
+#include <memory>
 #include <set>
 
 // SUSAN ADDED LIBS
@@ -193,8 +194,24 @@ class IfElseRegion : public CBERegion2 {
   bool containsBlock(BasicBlock *BB) override;
 
   private:
+  enum class CompoundPredicateOp { Leaf, And, Or };
+  struct CompoundPredicate {
+    CompoundPredicateOp op;
+    Value *leafValue = nullptr;
+    bool negateLeaf = false;
+    std::unique_ptr<CompoundPredicate> lhs;
+    std::unique_ptr<CompoundPredicate> rhs;
+  };
+
   BasicBlock* createSubIfElseRegions(BasicBlock* start, BasicBlock *brBlock, BasicBlock *stopBB, bool isElseBranch = false);
   void removeIfElseBlockFromLR(LoopRegion* lr, BasicBlock *brBB);
+  std::unique_ptr<CompoundPredicate> makeLeafPredicate(Value *V, bool Negate = false);
+  std::unique_ptr<CompoundPredicate> makeBinaryPredicate(CompoundPredicateOp Op,
+                                                         std::unique_ptr<CompoundPredicate> LHS,
+                                                         std::unique_ptr<CompoundPredicate> RHS);
+  bool tryBuildCompoundPredicate();
+  void printCompoundPredicate(const CompoundPredicate *Pred);
+  void printFlattenedChildBranch(IfElseRegion *Child, bool UseThenBranch);
 
   int dominatedByReturn(BasicBlock* brBB){
     Function *F = brBB->getParent();
@@ -357,6 +374,12 @@ class IfElseRegion : public CBERegion2 {
   
   // For function return detection
   bool isFunctionReturn = false;
+
+  std::unique_ptr<CompoundPredicate> compoundPredicate;
+  bool useCompoundPredicate = false;
+  bool flattenThenFromChild = false;
+  BasicBlock *flattenThenChildEntryBB = nullptr;
+  bool flattenThenUsesChildThenBranch = true;
 };
 
 }

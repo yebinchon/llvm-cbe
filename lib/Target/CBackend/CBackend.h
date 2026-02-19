@@ -156,6 +156,7 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
 
   //SUSAN: tables not need to be saved when inlining
   std::map<Value*, std::string> inlinedArgNames;
+  std::map<Value*, std::string> argNameOverrides;
   std::set<LoadInst*> addressExposedLoads;
   std::set<Value*> valuesCast2Double;
 
@@ -338,6 +339,8 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   void generateCompilerSpecificCode(raw_ostream &Out, const DataLayout *) const;
 
 public:
+  bool isExtraIVEquivalentToMainIV(PHINode *phi);
+
   static char ID;
   explicit CWriter(raw_ostream &o)
       : ModulePass(ID), OutHeaders(_OutHeaders), Out(_Out), FileOut(o) {
@@ -362,6 +365,11 @@ public:
   //virtual bool runOnFunction(Function &F);
   virtual bool runOnModule(Module &M);
   void emitPHIsForPredecessor(BasicBlock *BB);
+  void emitPHICopiesForSuccessorEdge(BasicBlock *CurBlock,
+                                     BasicBlock *Successor,
+                                     unsigned Indent) {
+    printPHICopiesForSuccessor(CurBlock, Successor, Indent);
+  }
 
 private:
   void generateHeader(Module &M);

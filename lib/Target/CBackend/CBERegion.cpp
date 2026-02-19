@@ -59,6 +59,67 @@ static bool reachesLoopExitFrom(BasicBlock *start, BasicBlock *loopExit,
   return false;
 }
 
+static bool collectCondInputsInBlock(Value *Root, BasicBlock *BB,
+                                     SmallPtrSetImpl<Instruction *> &CondInsts) {
+  SmallVector<Value *, 16> worklist;
+  SmallPtrSet<Value *, 32> visited;
+  worklist.push_back(Root);
+
+  while (!worklist.empty()) {
+    Value *V = worklist.pop_back_val();
+    if (!visited.insert(V).second)
+      continue;
+
+    auto *I = dyn_cast<Instruction>(V);
+    if (!I)
+      continue;
+
+    // Values computed outside this block are fine; they do not affect whether
+    // this block is condition-only.
+    if (I->getParent() != BB)
+      continue;
+
+    CondInsts.insert(I);
+    for (Value *Op : I->operands())
+      worklist.push_back(Op);
+  }
+  return true;
+}
+
+static bool isConditionOnlyBranchBlock(BasicBlock *BB, Value *&CondValue) {
+  CondValue = nullptr;
+  if (!BB)
+    return false;
+
+  auto *Br = dyn_cast<BranchInst>(BB->getTerminator());
+  if (!Br || !Br->isConditional())
+    return false;
+
+  CondValue = Br->getCondition();
+  SmallPtrSet<Instruction *, 16> condInsts;
+  collectCondInputsInBlock(CondValue, BB, condInsts);
+
+  for (auto &I : *BB) {
+    if (&I == BB->getTerminator())
+      break;
+    if (isa<DbgInfoIntrinsic>(&I) || isa<PHINode>(&I))
+      continue;
+
+    // Any non-debug/non-phi instruction must contribute directly to the branch
+    // condition graph; unrelated work means this is not a pure condition block.
+    if (!condInsts.count(&I))
+      return false;
+
+    // Allow compare nodes and side-effect-free arithmetic/cast/select used to
+    // compute the branch predicate. Reject anything with side effects.
+    if (isa<CmpInst>(&I))
+      continue;
+    if (!isSafeToSpeculativelyExecute(&I))
+      return false;
+  }
+  return CondValue != nullptr;
+}
+
 } // namespace
 
 LoopRegion *CBERegion2::getContainingLoopRegion(BasicBlock *BB) {
@@ -165,12 +226,17 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   // FIXME: this will only work for single level if-else statements
   // Need more sophisticated return checking logic to handle nested statements
   // Nested statements may require a bottom-up approach
-  bool exitFunctionTrueBr = isExitingFunction(trueStartBB);
-  bool exitFunctionFalseBr = isExitingFunction(falseStartBB);
+  BasicBlock *trueExitBB = isExitingFunction(trueStartBB);
+  BasicBlock *falseExitBB = isExitingFunction(falseStartBB);
+  bool exitFunctionTrueBr = (trueExitBB != nullptr);
+  bool exitFunctionFalseBr = (falseExitBB != nullptr);
   // A branch target that is exactly this if-region's postdom merge is not an
   // early return path; it is normal structured fallthrough toward function end.
-  bool trueBranchIsMerge = (pdBB && trueStartBB == pdBB);
-  bool falseBranchIsMerge = (pdBB && falseStartBB == pdBB);
+  // Also treat "branch -> ... -> pdBB(return)" as merge fallthrough.
+  bool trueBranchIsMerge =
+      (pdBB && (trueStartBB == pdBB || trueExitBB == pdBB));
+  bool falseBranchIsMerge =
+      (pdBB && (falseStartBB == pdBB || falseExitBB == pdBB));
   bool trueEarlyExit = exitFunctionTrueBr && !trueBranchIsMerge;
   bool falseEarlyExit = exitFunctionFalseBr && !falseBranchIsMerge;
   // Four possible control flows: both exit, only one exits
@@ -284,6 +350,7 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     }
     // Fall through to normal if-else handling
   }
+
   // Normal if-else handling
   {
 
@@ -430,14 +497,34 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
     if (auto lr = getParentLoopRegion())
       for (auto BB : falseBBs)
         lr->removeBBToVisit(BB);
-    createSubIfElseRegions(trueStartBB, brBB, falseStartBB, false);
+    BasicBlock *trueOnlyStopBB = falseStartBB;
+    if (forcedByShortCircuitTail && pdBB)
+      trueOnlyStopBB = pdBB;
+    errs() << "CBERegion_DEBUG: true-only stop boundary in "
+           << brBB->getParent()->getName() << "::" << brBB->getName()
+           << " stop=" << (trueOnlyStopBB ? trueOnlyStopBB->getName() : StringRef("<null>"))
+           << " falseStart="
+           << (falseStartBB ? falseStartBB->getName() : StringRef("<null>"))
+           << " pdBB=" << (pdBB ? pdBB->getName() : StringRef("<null>"))
+           << " forcedByShortCircuitTail=" << forcedByShortCircuitTail << "\n";
+    createSubIfElseRegions(trueStartBB, brBB, trueOnlyStopBB, false);
     nextEntryBB = falseStartBB;
   } else if (falseBrOnly && (returnDominated == -1)) {
     errs() << "SUSAN: marking only false branch\n";
     if (auto lr = getParentLoopRegion())
       for (auto BB : trueBBs)
         lr->removeBBToVisit(BB);
-    createSubIfElseRegions(falseStartBB, brBB, trueStartBB, true);
+    BasicBlock *falseOnlyStopBB = trueStartBB;
+    if (forcedByShortCircuitTail && pdBB)
+      falseOnlyStopBB = pdBB;
+    errs() << "CBERegion_DEBUG: false-only stop boundary in "
+           << brBB->getParent()->getName() << "::" << brBB->getName()
+           << " stop=" << (falseOnlyStopBB ? falseOnlyStopBB->getName() : StringRef("<null>"))
+           << " trueStart="
+           << (trueStartBB ? trueStartBB->getName() : StringRef("<null>"))
+           << " pdBB=" << (pdBB ? pdBB->getName() : StringRef("<null>"))
+           << " forcedByShortCircuitTail=" << forcedByShortCircuitTail << "\n";
+    createSubIfElseRegions(falseStartBB, brBB, falseOnlyStopBB, true);
     nextEntryBB = trueStartBB;
   } else {
     errs() << "SUSAN: marking both branches\n";
@@ -456,6 +543,11 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
       errs() << "CBERegion: nextEntryBB 121: <null>\n";
   }
 
+  useCompoundPredicate = tryBuildCompoundPredicate();
+  errs() << "CBERegion_DEBUG: compound predicate for "
+         << brBB->getParent()->getName() << "::" << brBB->getName()
+         << " enabled=" << useCompoundPredicate << "\n";
+
   if (parentR && parentR->isaLoopRegion())
     removeIfElseBlockFromLR((LoopRegion *)parentR, brBB);
   errs() << "=================SUSAN: END OF marking region : "
@@ -463,10 +555,140 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
   }
 }
 
+std::unique_ptr<IfElseRegion::CompoundPredicate>
+IfElseRegion::makeLeafPredicate(Value *V, bool Negate) {
+  auto Pred = std::make_unique<CompoundPredicate>();
+  Pred->op = CompoundPredicateOp::Leaf;
+  Pred->leafValue = V;
+  Pred->negateLeaf = Negate;
+  return Pred;
+}
+
+std::unique_ptr<IfElseRegion::CompoundPredicate>
+IfElseRegion::makeBinaryPredicate(
+    CompoundPredicateOp Op, std::unique_ptr<CompoundPredicate> LHS,
+    std::unique_ptr<CompoundPredicate> RHS) {
+  auto Pred = std::make_unique<CompoundPredicate>();
+  Pred->op = Op;
+  Pred->lhs = std::move(LHS);
+  Pred->rhs = std::move(RHS);
+  return Pred;
+}
+
+bool IfElseRegion::tryBuildCompoundPredicate() {
+  compoundPredicate.reset();
+  flattenThenFromChild = false;
+  flattenThenChildEntryBB = nullptr;
+  flattenThenUsesChildThenBranch = true;
+
+  if (!brInst || !brInst->isConditional())
+    return false;
+
+  Value *parentCond = brInst->getCondition();
+  if (!parentCond)
+    return false;
+
+  // Pattern A: Parent true-arm starts with a condition-only block that shares
+  // the parent's false-tail. This is a short-circuit && pattern.
+  Value *childCond = nullptr;
+  if (isConditionOnlyBranchBlock(trueStartBB, childCond)) {
+    auto *childBr = cast<BranchInst>(trueStartBB->getTerminator());
+    bool childTrueToParentFalse = (childBr->getSuccessor(0) == falseStartBB);
+    bool childFalseToParentFalse = (childBr->getSuccessor(1) == falseStartBB);
+    if (childTrueToParentFalse || childFalseToParentFalse) {
+      bool negateChild = childTrueToParentFalse;
+      bool childThenIsCombinedThen = childFalseToParentFalse;
+      compoundPredicate = makeBinaryPredicate(
+          CompoundPredicateOp::And, makeLeafPredicate(parentCond, false),
+          makeLeafPredicate(childCond, negateChild));
+      // The child condition has been absorbed into the parent condition.
+      // When printing the parent true branch, print only the selected child
+      // branch body to avoid a redundant nested check.
+      flattenThenFromChild = true;
+      flattenThenChildEntryBB = trueStartBB;
+      flattenThenUsesChildThenBranch = childThenIsCombinedThen;
+      errs() << "CBERegion_DEBUG: collapsed short-circuit && at "
+             << brBB->getParent()->getName() << "::" << brBB->getName()
+             << " child=" << trueStartBB->getName()
+             << " sharedFalseTail=" << falseStartBB->getName()
+             << " negateChild=" << negateChild
+             << " flattenThenUsesChildThenBranch="
+             << flattenThenUsesChildThenBranch << "\n";
+      return true;
+    }
+  }
+
+  // Pattern B: Parent false-arm starts with a condition-only block that shares
+  // the parent's true-tail. This is a short-circuit || pattern.
+  childCond = nullptr;
+  if (isConditionOnlyBranchBlock(falseStartBB, childCond)) {
+    auto *childBr = cast<BranchInst>(falseStartBB->getTerminator());
+    bool childTrueToParentTrue = (childBr->getSuccessor(0) == trueStartBB);
+    bool childFalseToParentTrue = (childBr->getSuccessor(1) == trueStartBB);
+    if (childTrueToParentTrue || childFalseToParentTrue) {
+      bool negateChild = childFalseToParentTrue;
+      compoundPredicate = makeBinaryPredicate(
+          CompoundPredicateOp::Or, makeLeafPredicate(parentCond, false),
+          makeLeafPredicate(childCond, negateChild));
+      errs() << "CBERegion_DEBUG: collapsed short-circuit || at "
+             << brBB->getParent()->getName() << "::" << brBB->getName()
+             << " child=" << falseStartBB->getName()
+             << " sharedTrueTail=" << trueStartBB->getName()
+             << " negateChild=" << negateChild << "\n";
+      return true;
+    }
+  }
+
+  errs() << "CBERegion_DEBUG: no compound predicate pattern at "
+         << brBB->getParent()->getName() << "::" << brBB->getName() << "\n";
+  return false;
+}
+
+void IfElseRegion::printCompoundPredicate(const CompoundPredicate *Pred) {
+  if (!Pred)
+    return;
+
+  switch (Pred->op) {
+  case CompoundPredicateOp::Leaf:
+    if (Pred->negateLeaf)
+      cw->Out << "!(";
+    cw->writeOperand(Pred->leafValue, cw->ContextCasted);
+    if (Pred->negateLeaf)
+      cw->Out << ")";
+    return;
+  case CompoundPredicateOp::And:
+  case CompoundPredicateOp::Or:
+    cw->Out << "(";
+    printCompoundPredicate(Pred->lhs.get());
+    cw->Out << (Pred->op == CompoundPredicateOp::And ? " && " : " || ");
+    printCompoundPredicate(Pred->rhs.get());
+    cw->Out << ")";
+    return;
+  }
+}
+
+void IfElseRegion::printFlattenedChildBranch(IfElseRegion *Child,
+                                             bool UseThenBranch) {
+  if (!Child)
+    return;
+  auto &SubRegions =
+      UseThenBranch ? Child->thenSubRegions : Child->elseSubRegions;
+  for (auto *R : SubRegions)
+    R->printRegionDAG();
+}
+
 BasicBlock *IfElseRegion::createSubIfElseRegions(BasicBlock *start,
                                                  BasicBlock *brBlock,
                                                  BasicBlock *stopBB,
                                                  bool isElseBranch) {
+  if (!start || !brBlock) {
+    errs() << "CBERegion_DEBUG: invalid subregion boundary start="
+           << (start ? start->getName() : StringRef("<null>"))
+           << " brBlock="
+           << (brBlock ? brBlock->getName() : StringRef("<null>"))
+           << ", aborting subregion walk\n";
+    return start;
+  }
   LoopRegion *lr = getParentLoopRegion();
   if (lr)
     lr->removeBBToVisit(brBlock);
@@ -804,19 +1026,65 @@ void IfElseRegion::printRegionDAG() {
 
   // print If branch
   cw->Out << "  if (";
-  cw->writeOperand(condInst, cw->ContextCasted);
+  if (useCompoundPredicate && compoundPredicate) {
+    errs() << "CBERegion_DEBUG: printing compound predicate for "
+           << brBB->getParent()->getName() << "::" << brBB->getName() << "\n";
+    printCompoundPredicate(compoundPredicate.get());
+  } else {
+    cw->writeOperand(condInst, cw->ContextCasted);
+  }
   cw->Out << ") {";
   cw->Out << " // IFELSE MARKER: " << entryBlock->getName() << " IF\n"; 
-  for (auto R : thenSubRegions)
+  for (auto *R : thenSubRegions) {
+    if (flattenThenFromChild && R &&
+        R->getEntryBlock() == flattenThenChildEntryBB &&
+        R->isaIfElseRegion()) {
+      auto *Child = static_cast<IfElseRegion *>(R);
+      errs() << "CBERegion_DEBUG: flattening absorbed child condition at "
+             << brBB->getParent()->getName() << "::" << brBB->getName()
+             << " child=" << flattenThenChildEntryBB->getName()
+             << " useThen=" << flattenThenUsesChildThenBranch << "\n";
+      printFlattenedChildBranch(Child, flattenThenUsesChildThenBranch);
+      continue;
+    }
     R->printRegionDAG();
+  }
+  // Materialize merge PHIs for simple direct-edge true branch blocks.
+  if (trueStartBB && pdBB) {
+    auto *trueTerm = dyn_cast<BranchInst>(trueStartBB->getTerminator());
+    if (trueTerm) {
+      for (unsigned i = 0; i < trueTerm->getNumSuccessors(); ++i) {
+        if (trueTerm->getSuccessor(i) == pdBB) {
+          cw->emitPHICopiesForSuccessorEdge(trueStartBB, pdBB, 2);
+          break;
+        }
+      }
+    }
+  }
+
+  bool falseEdgeNeedsMergeCopies = false;
+  if (falseStartBB && pdBB) {
+    auto *falseTerm = dyn_cast<BranchInst>(falseStartBB->getTerminator());
+    if (falseTerm) {
+      for (unsigned i = 0; i < falseTerm->getNumSuccessors(); ++i) {
+        if (falseTerm->getSuccessor(i) == pdBB) {
+          falseEdgeNeedsMergeCopies = true;
+          break;
+        }
+      }
+    }
+  }
 
   // print else branch
-  if (!elseSubRegions.empty()) {
+  if (!elseSubRegions.empty() || falseEdgeNeedsMergeCopies) {
     errs() << "elseSubRegions : \n";
     cw->Out << "  } else {";
     cw->Out << " // IFELSE MARKER: " << entryBlock->getName() << " ELSE\n";
     for (auto R : elseSubRegions)
       R->printRegionDAG();
+    // Materialize merge PHIs for simple direct-edge false branch blocks.
+    if (falseEdgeNeedsMergeCopies)
+      cw->emitPHICopiesForSuccessorEdge(falseStartBB, pdBB, 2);
   }
 
   cw->Out << "  }\n";
@@ -937,6 +1205,11 @@ void LoopRegion::printRegionDAG() {
     if (PHINode *phi = dyn_cast<PHINode>(&I)) {
       if (phi == IV)
         continue;
+      if (cw->isExtraIVEquivalentToMainIV(phi)) {
+        errs() << "ANDREW: Skipping preheader init for equivalent extra IV: "
+               << *phi << "\n";
+        continue;
+      }
       for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
         BasicBlock *incomingBB = phi->getIncomingBlock(i);
         if (!loop->contains(incomingBB)) {
@@ -1046,11 +1319,31 @@ void LoopRegion::printRegionDAG() {
   cw->Out << "for(";
 
   // initiation
-  // ANDREW: Only print type if IV name is different from lower bound name
-  // This prevents redeclaration/shadowing when using loop-carried values
+  // Only emit an inline IV declaration when it is safe.
+  // - If the IV name differs from the lower-bound name, declaring in-header is
+  //   naturally safe.
+  // - If the lower bound is an instruction/expression, we may still need an
+  //   in-header declaration to avoid "for(i = ...)" with an undeclared i.
+  //   However, do NOT redeclare when the IV is used outside this loop, because
+  //   that shadows an outer-scope IV and can leave the outer value uninitialized
+  //   after the loop (e.g. use-after-loop of k in sparse()).
   std::string ivName = cw->GetValueName(IV);
   std::string lbName = cw->GetValueName(lb);
-  if (ivName != lbName) {
+  bool lbIsInstruction = isa<Instruction>(lb);
+  bool ivUsedOutsideLoop = false;
+  for (User *U : IV->users()) {
+    if (Instruction *UI = dyn_cast<Instruction>(U))
+      if (!loop->contains(UI->getParent())) {
+        ivUsedOutsideLoop = true;
+        break;
+      }
+  }
+
+  // Never redeclare the IV in the for-header if it escapes the loop; that
+  // must reuse the function-scope variable.
+  bool shouldDeclareInHeader =
+      !ivUsedOutsideLoop && (ivName != lbName || lbIsInstruction);
+  if (shouldDeclareInHeader) {
     cw->printTypeName(cw->Out, IV->getType(), true);
     cw->Out << " ";
   }
@@ -1149,6 +1442,12 @@ void LoopRegion::printRegionDAG() {
     if (PHINode *phi = dyn_cast<PHINode>(&I)) {
       // Skip the induction variable, it's handled by the for() update
       if (phi == IV) continue;
+
+      if (cw->isExtraIVEquivalentToMainIV(phi)) {
+        errs() << "ANDREW: Skipping equivalent extra IV update (remapped to main IV): "
+               << *phi << "\n";
+        continue;
+      }
       
       // Find the value coming from inside the loop (not the initial value)
       for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
@@ -1366,14 +1665,23 @@ void LoopRegion::printDoWhileLoop() {
               default: cw->Out << " /* unknown op */ "; break;
             }
             Value *rhs = binOp->getOperand(1);
-            bool rhsNeedsParensForSub =
+            bool rhsNeedsParensForNonAssoc =
                 (binOp->getOpcode() == Instruction::Sub ||
-                 binOp->getOpcode() == Instruction::FSub) &&
+                 binOp->getOpcode() == Instruction::FSub ||
+                 binOp->getOpcode() == Instruction::UDiv ||
+                 binOp->getOpcode() == Instruction::SDiv ||
+                 binOp->getOpcode() == Instruction::FDiv ||
+                 binOp->getOpcode() == Instruction::URem ||
+                 binOp->getOpcode() == Instruction::SRem ||
+                 binOp->getOpcode() == Instruction::FRem ||
+                 binOp->getOpcode() == Instruction::Shl ||
+                 binOp->getOpcode() == Instruction::LShr ||
+                 binOp->getOpcode() == Instruction::AShr) &&
                 isa<BinaryOperator>(rhs);
-            if (rhsNeedsParensForSub)
+            if (rhsNeedsParensForNonAssoc)
               cw->Out << "(";
             cw->writeOperandInternal(rhs);
-            if (rhsNeedsParensForSub)
+            if (rhsNeedsParensForNonAssoc)
               cw->Out << ")";
             errs() << "ANDREW: Expanded BinaryOp for PHI update: " << *binOp << "\n";
           } else {
