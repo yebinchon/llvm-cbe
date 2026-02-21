@@ -398,18 +398,31 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
          << " falseBrOnly=" << falseBrOnly
          << " returnDominated=" << returnDominated << "\n";
 
-  // If the merge block carries PHI values from both successors, keep explicit
-  // if/else structure to preserve per-branch assignments and avoid hoisting one
-  // path outside the conditional.
+  // If the merge block carries PHI values sourced from both branch subgraphs,
+  // keep explicit if/else structure to preserve per-branch assignments and
+  // avoid dropping values that are selected only by deeper branch blocks.
   bool needsBothBranchesForPhi = false;
   if (pdBB) {
+    auto incoming_from_true_subgraph = [&](BasicBlock *incoming_bb) -> bool {
+      return incoming_bb == trueStartBB || trueBBs.count(incoming_bb) != 0;
+    };
+    auto incoming_from_false_subgraph = [&](BasicBlock *incoming_bb) -> bool {
+      return incoming_bb == falseStartBB || falseBBs.count(incoming_bb) != 0;
+    };
     for (auto &I : *pdBB) {
       PHINode *phi = dyn_cast<PHINode>(&I);
       if (!phi)
         break;
-      int trueIdx = phi->getBasicBlockIndex(trueStartBB);
-      int falseIdx = phi->getBasicBlockIndex(falseStartBB);
-      if (trueIdx >= 0 && falseIdx >= 0) {
+      bool has_true_incoming = false;
+      bool has_false_incoming = false;
+      for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+        BasicBlock *incoming_bb = phi->getIncomingBlock(i);
+        if (incoming_from_true_subgraph(incoming_bb))
+          has_true_incoming = true;
+        if (incoming_from_false_subgraph(incoming_bb))
+          has_false_incoming = true;
+      }
+      if (has_true_incoming && has_false_incoming) {
         needsBothBranchesForPhi = true;
         break;
       }
@@ -508,7 +521,10 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
            << " pdBB=" << (pdBB ? pdBB->getName() : StringRef("<null>"))
            << " forcedByShortCircuitTail=" << forcedByShortCircuitTail << "\n";
     createSubIfElseRegions(trueStartBB, brBB, trueOnlyStopBB, false);
-    nextEntryBB = falseStartBB;
+    // In branch-only mode, the opposite successor can be a PHI-select edge-only
+    // trampoline. Hand off at the merge to avoid later linear re-emission of
+    // that opposite path (which can overwrite PHI-selected values).
+    nextEntryBB = pdBB ? pdBB : falseStartBB;
   } else if (falseBrOnly && (returnDominated == -1)) {
     errs() << "SUSAN: marking only false branch\n";
     if (auto lr = getParentLoopRegion())
@@ -525,7 +541,10 @@ IfElseRegion::IfElseRegion(BasicBlock *entryBB, CBERegion2 *parentR,
            << " pdBB=" << (pdBB ? pdBB->getName() : StringRef("<null>"))
            << " forcedByShortCircuitTail=" << forcedByShortCircuitTail << "\n";
     createSubIfElseRegions(falseStartBB, brBB, falseOnlyStopBB, true);
-    nextEntryBB = trueStartBB;
+    // In branch-only mode, the opposite successor can be a PHI-select edge-only
+    // trampoline. Hand off at the merge to avoid later linear re-emission of
+    // that opposite path (which can overwrite PHI-selected values).
+    nextEntryBB = pdBB ? pdBB : trueStartBB;
   } else {
     errs() << "SUSAN: marking both branches\n";
     auto nextEntryBB1 =
@@ -1360,12 +1379,7 @@ void LoopRegion::printRegionDAG() {
   // ANDREW CASTING
   if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
     cw->writeOperandWithCast(condInst->getOperand(0), *icmp);
-    if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
-      cw->Out << " < ";
-    else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
-      cw->Out << " < ";
-    else
-      cw->printCmpOperator(icmp, negateCondition);
+    cw->printCmpOperator(icmp, negateCondition);
     // ANDREW CASTING
     cw->writeOperandWithCast(condInst->getOperand(1), *icmp);
   } else if (FCmpInst *fcmp = dyn_cast<FCmpInst>(condInst)) {
@@ -1741,12 +1755,7 @@ void LoopRegion::printDoWhileLoop() {
     ICmpInst *icmp = dyn_cast<ICmpInst>(condInst);
     writeOperandOrPHI(condInst->getOperand(0), icmp);
     if (icmp) {
-      if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
-        cw->Out << " < ";
-      else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
-        cw->Out << " < ";
-      else
-        cw->printCmpOperator(icmp, negateCondition);
+      cw->printCmpOperator(icmp, negateCondition);
     } else if (FCmpInst *fcmp = dyn_cast<FCmpInst>(condInst)) {
       // Handle float comparisons
       CmpInst::Predicate pred = fcmp->getPredicate();
@@ -1855,12 +1864,7 @@ void LoopRegion::printWhileLoop() {
   else {
     if (ICmpInst *icmp = dyn_cast<ICmpInst>(condInst)) {
       cw->writeOperandWithCast(condInst->getOperand(0), *icmp);
-      if (!negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_NE))
-        cw->Out << " < ";
-      else if (negateCondition && (icmp->getPredicate() == ICmpInst::ICMP_EQ))
-        cw->Out << " < ";
-      else
-        cw->printCmpOperator(icmp, negateCondition);
+      cw->printCmpOperator(icmp, negateCondition);
       cw->writeOperandWithCast(condInst->getOperand(1), *icmp);
     } else {
       cw->writeOperandInternal(condInst->getOperand(0));

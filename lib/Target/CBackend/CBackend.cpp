@@ -4681,17 +4681,68 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
       break;
     }
 
-  if (isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate)
+  bool printIVIncrementExpr =
+      isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate;
+  Value *ivBaseToPrint = nullptr;
+  Value *ivStepToPrint = nullptr;
+  bool negateStep = false;
+
+  if (printIVIncrementExpr) {
+    if (Instruction *IncInst = dyn_cast<Instruction>(Operand)) {
+      if (BinaryOperator *BO = dyn_cast<BinaryOperator>(IncInst)) {
+        Value *Op0 = BO->getOperand(0);
+        Value *Op1 = BO->getOperand(1);
+        if (BO->getOpcode() == Instruction::Add) {
+          if (isLoopIVOrRelated(Op0)) {
+            ivBaseToPrint = Op0;
+            ivStepToPrint = Op1;
+          } else if (isLoopIVOrRelated(Op1)) {
+            ivBaseToPrint = Op1;
+            ivStepToPrint = Op0;
+          }
+        } else if (BO->getOpcode() == Instruction::Sub &&
+                   isLoopIVOrRelated(Op0)) {
+          ivBaseToPrint = Op0;
+          ivStepToPrint = Op1;
+          negateStep = true;
+        }
+      }
+    }
+
+    if (!ivBaseToPrint && isOmpLoop && LP)
+      ivBaseToPrint = LP->IV;
+    if (!ivStepToPrint && isOmpLoop && LP)
+      ivStepToPrint = LP->incr;
+  }
+
+  if (printIVIncrementExpr)
     Out << "(";
 
-  if (isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) &&
-      !omp_declarePrivate && isOmpLoop)
-    writeOperandInternal(LP->IV, Context, startExpression);
+  if (printIVIncrementExpr && ivBaseToPrint)
+    writeOperandInternal(ivBaseToPrint, Context, startExpression);
   else
     writeOperandInternal(Operand, Context, startExpression);
 
-  if (isIVIncrement(Operand) && !isa<CmpInst>(CurInstr) && !omp_declarePrivate)
-    Out << " + 1)";
+  if (printIVIncrementExpr) {
+    if (ivStepToPrint) {
+      if (ConstantInt *StepConst = dyn_cast<ConstantInt>(ivStepToPrint)) {
+        int64_t StepVal = StepConst->getSExtValue();
+        if (negateStep)
+          StepVal = -StepVal;
+        if (StepVal >= 0)
+          Out << " + " << StepVal;
+        else
+          Out << " - " << -StepVal;
+      } else {
+        Out << (negateStep ? " - " : " + ");
+        writeOperandInternal(ivStepToPrint, Context, startExpression);
+      }
+    } else {
+      // Conservative fallback for unusual increment forms.
+      Out << " + 1";
+    }
+    Out << ")";
+  }
 
   if (isAddressImplicit)
     Out << ')';
@@ -8367,8 +8418,13 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
     return;
   if (emitOpenMPAtomicForInst(I))
     return;
+  bool emitsLHS =
+      !I->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I);
+  // Skip side-effect-free expressions that would only emit as no-op statements.
+  if (!emitsLHS && !I->mayHaveSideEffects())
+    return;
   Out << "  ";
-  if (!(&*I)->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I)) {
+  if (emitsLHS) {
     auto varName = GetValueName(&*I, true);
     if (canDeclareLocalLate(*I) && !isIVIncrement(I) && !isExtraIVIncrement(I)) {
       if (declaredLocals.find(varName) == declaredLocals.end()) {
@@ -8875,6 +8931,12 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
     //} else
     if(isInlinableInst(*II)) errs() << *II << " is inlinable\n";
     if (!isInlinableInst(*II)) {
+      bool emitsLHS = ((&*II)->user_begin() != (&*II)->user_end() &&
+                       !isEmptyType(II->getType()) && !isInlineAsm(*II));
+      if (!emitsLHS && !II->mayHaveSideEffects()) {
+        errs() << "CBEBackend: skipping side-effect-free stmt " << *II << "\n";
+        continue;
+      }
       errs() << "SUSAN: printing instruction " << *II << " at 6678\n";
       if (CallInst *CI = dyn_cast<CallInst>(&*II)) {
         if (Function *Called = CI->getCalledFunction()) {
@@ -8890,8 +8952,7 @@ void CWriter::printBasicBlock(BasicBlock *BB, std::set<Value *> skipInsts) {
       if (!isEmptyType(II->getType()) || isa<StoreInst>(&*II))
         Out << "  ";
 
-      if ((&*II)->user_begin() != (&*II)->user_end() &&
-          !isEmptyType(II->getType()) && !isInlineAsm(*II)) {
+      if (emitsLHS) {
         auto varName = GetValueName(&*II);
         if (declaredLocals.find(varName) == declaredLocals.end() &&
             omp_declaredLocals.find(varName) == omp_declaredLocals.end()) {
