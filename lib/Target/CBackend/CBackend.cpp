@@ -1163,6 +1163,10 @@ Instruction *CWriter::getIVIncrement(Loop *L, PHINode *IV) {
 }
 
 PHINode *CWriter::getInductionVariable(Loop *L) {
+  if (!L) {
+    errs() << "ANDREW: getInductionVariable got null loop\n";
+    return nullptr;
+  }
 
   errs() << "ANDREW: getInductionVariable\n";
   errs() << "trying to get IV for Loop:" << L->getHeader()->getName() << "\n";
@@ -1211,6 +1215,7 @@ PHINode *CWriter::getInductionVariable(Loop *L) {
 void CWriter::CreateOmpLoops(Loop *L, Value *ub, Value *lb, Value *incr) {
   LoopProfile *ompLI = new LoopProfile();
   ompLI->L = L;
+  ompLI->LoopHeader = L ? L->getHeader() : nullptr;
   ompLI->ub = ub;
   ompLI->lb = lb;
   ompLI->incr = incr;
@@ -1349,6 +1354,25 @@ void CWriter::preprossesPHIs2Print(Function &F) {
         }
 
         if (Instruction *incomingInst = dyn_cast<Instruction>(phiVal)) {
+          // Guard PHI->PHI coalescing across unrelated blocks.
+          // Without dominance safety, a later PHI name can leak backward into
+          // earlier blocks (e.g. while condition using a value only defined in
+          // a post-loop/if-merge PHI), producing incorrect C variables.
+          if (auto *incomingPhi = dyn_cast<PHINode>(incomingInst)) {
+            if (auto *replacePhi = dyn_cast<PHINode>(replaceVal)) {
+              bool sameBlock =
+                  incomingPhi->getParent() == replacePhi->getParent();
+              bool dominatesIncoming =
+                  DT && DT->dominates(replacePhi->getParent(),
+                                      incomingPhi->getParent());
+              if (!sameBlock && !dominatesIncoming) {
+                errs() << "ANDREW: SKIPPING non-dominating PHI coalescing: "
+                       << *incomingPhi << " -> " << *replacePhi << "\n";
+                continue;
+              }
+            }
+          }
+
           // ANDREW: Skip coalescing for loop-carried PHI values where the 
           // incoming instruction is computed inside the same loop.
           // This prevents incorrect substitution like %div -> %kk.0 when
@@ -1457,6 +1481,7 @@ void CWriter::omp_preprossesing(Function &F) {
          */
         if (ompCall->getName().contains("__kmpc_for_static_init")) {
           LoopProfile *ompLP = new LoopProfile();
+          ompLP->LoopHeader = nullptr;
           initCI = CI;
           omp_SkipVals.insert(cast<Value>(CI));
 
@@ -1517,6 +1542,7 @@ void CWriter::omp_preprossesing(Function &F) {
           assert(ompLoop && "didn't find omp loop?\n");
           errs() << "SUSAN: omploop:" << *ompLoop << "\n";
           currLP->L = ompLoop;
+          currLP->LoopHeader = ompLoop ? ompLoop->getHeader() : nullptr;
           currLP->isOmpLoop = true;
           currLP->barrier = false;
           countBarrier = 0;
@@ -1757,6 +1783,7 @@ void CWriter::preprocessLoopProfiles(Function &F) {
       LoopProfile *LP = new LoopProfile();
       LP->isForLoop = false;
       LP->L = L;
+      LP->LoopHeader = L ? L->getHeader() : nullptr;
       LP->IV = nullptr;
       LP->IVInc = nullptr;
       LP->ub = nullptr;
@@ -1778,6 +1805,7 @@ void CWriter::preprocessLoopProfiles(Function &F) {
     LoopProfile *LP = new LoopProfile();
     LP->isForLoop = true;
     LP->L = L;
+    LP->LoopHeader = L ? L->getHeader() : nullptr;
     LP->IV = IV;
     LP->IVInc = getIVIncrement(L, IV);
 
@@ -5821,6 +5849,8 @@ void CWriter::generateHeader(Module &M) {
       continue;
     if ((&*I)->getName().contains("strcpy"))
       continue;
+    if ((&*I)->getName().contains("memset"))
+      continue;
     // if((&*I)->getName().contains("xmalloc")) continue;
     //  Don't print declarations for intrinsic functions.
     //  Store the used intrinsics, which need to be explicitly defined.
@@ -7859,8 +7889,18 @@ void CWriter::printFunction(Function &F, bool inlineF) {
       errs() << "SUSAN: phi related name: " << name << "\n";
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
         if (Instruction *incomingInst =
-                dyn_cast<Instruction>(phi->getIncomingValue(i)))
+                dyn_cast<Instruction>(phi->getIncomingValue(i))) {
+          // Do not let non-IV PHI names overwrite loop IV names.
+          // Example failure mode: plane IV gets renamed to juppermax
+          // because cond57 includes %plane.0 as one incoming edge.
+          if (isInductionVariable(incomingInst) || isIVIncrement(incomingInst) ||
+              isExtraInductionVariable(incomingInst) ||
+              isExtraIVIncrement(incomingInst)) {
+            if (!(isInductionVariable(phi) || isExtraInductionVariable(phi)))
+              continue;
+          }
           IRNaming.insert(std::make_pair(incomingInst, name));
+        }
     }
   }
 
@@ -7955,7 +7995,13 @@ void CWriter::printFunction(Function &F, bool inlineF) {
     if (isa<PHINode>(inst))
       continue;
     for (unsigned i = 0, e = inst->getNumOperands(); i != e; ++i)
-      if (Instruction *operand = dyn_cast<Instruction>(inst->getOperand(i)))
+      if (Instruction *operand = dyn_cast<Instruction>(inst->getOperand(i))) {
+        // Keep canonical/extra IV names stable through the contradiction pass.
+        // If we erase/rebind these names, for-loop headers can end up mixing
+        // fallback IV names (e.g. j) with source names (e.g. plane).
+        if (isInductionVariable(operand) || isIVIncrement(operand) ||
+            isExtraInductionVariable(operand) || isExtraIVIncrement(operand))
+          continue;
         for (auto &[var, valAtOperand] : var2val)
           if (operand == valAtOperand) {
 
@@ -7981,6 +8027,7 @@ void CWriter::printFunction(Function &F, bool inlineF) {
             IR2vars[operand].insert(var);
             IRNaming.insert(std::make_pair(operand, var));
           }
+      }
   }
 
   for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
@@ -8291,124 +8338,12 @@ void CWriter::printCmpOperator(ICmpInst *icmp, bool negateCondition) {
 }
 
 void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
-  auto extractMappedPtrStorage = [](Value *V) -> Value * {
-    Value *Cur = V;
-    while (Cur) {
-      if (auto *BC = dyn_cast<BitCastInst>(Cur)) {
-        Cur = BC->getOperand(0);
-        continue;
-      }
-      if (auto *BC = dyn_cast<BitCastOperator>(Cur)) {
-        Cur = BC->getOperand(0);
-        continue;
-      }
-      if (auto *LI = dyn_cast<LoadInst>(Cur))
-        return LI->getPointerOperand();
-      return Cur;
-    }
-    return nullptr;
-  };
+  if (I->getMetadata("tulip.target.end.of.map"))
+    return;
+  if (I->getMetadata("tulip.target.start.of.map"))
+    return;
   if (CallInst *CI = dyn_cast<CallInst>(I)) {
-    if (I->getMetadata("tulip.target.start.of.map") ||
-        I->getMetadata("tulip.target.end.of.map")) {
-      Function *Called = CI->getCalledFunction();
-      if (Called && Called->getName().contains("cudaMemcpy") &&
-          CI->arg_size() >= 4) {
-        if (auto *Mode = dyn_cast<ConstantInt>(CI->getArgOperand(3))) {
-          Value *DstStorage = extractMappedPtrStorage(CI->getArgOperand(0));
-          Value *SrcStorage = extractMappedPtrStorage(CI->getArgOperand(1));
-          if (DstStorage && SrcStorage) {
-            Type *DstTy = DstStorage->getType();
-            Type *SrcTy = SrcStorage->getType();
-            int64_t mapMode = Mode->getSExtValue();
-            errs() << "ANDREW: map-lowering cudaMemcpy mode " << mapMode
-                   << " dst=" << *DstStorage << " src=" << *SrcStorage << "\n";
-            if (mapMode == 1) {
-              if (auto *DstGEP = dyn_cast<GetElementPtrInst>(DstStorage)) {
-                if (DstGEP->getPointerOperand() == SrcStorage) {
-                  errs() << "ANDREW: skipping self-copy map lowering: "
-                         << *CI << "\n";
-                  return;
-                }
-              }
-            }
-
-            bool emittedScalarMap = false;
-            if (auto *DstPtrTy = dyn_cast<PointerType>(DstTy)) {
-              if (auto *SrcPtrTy = dyn_cast<PointerType>(SrcTy)) {
-                Type *DstElemTy = DstPtrTy->getPointerElementType();
-                Type *SrcElemTy = SrcPtrTy->getPointerElementType();
-
-                // Scalar host<->device map lowering.
-                // mode 1 (H2D):  *dev_ptr = host_scalar
-                // mode 2 (D2H):  host_scalar = *dev_ptr
-                if (mapMode == 1 && DstElemTy == SrcTy && !SrcElemTy->isPointerTy()) {
-                  Out << "  *" << GetValueName(DstStorage) << " = "
-                      << GetValueName(SrcStorage);
-                  emittedScalarMap = true;
-                } else if (mapMode == 2 && SrcElemTy == DstTy &&
-                           !DstElemTy->isPointerTy()) {
-                  Out << "  " << GetValueName(DstStorage) << " = *"
-                      << GetValueName(SrcStorage);
-                  emittedScalarMap = true;
-                }
-              }
-            }
-
-            if (emittedScalarMap) {
-              Out << "; /* map mode " << Mode->getSExtValue() << " */\n";
-            } else {
-              errs() << "ANDREW: skipping non-scalar map-lowering: "
-                     << *CI << "\n";
-            }
-          }
-        }
-      }
-      return;
-    }
-  }
-  if (CallInst *CI = dyn_cast<CallInst>(I)) {
-    Function *Called = CI->getCalledFunction();
-    if (Called && Called->getName().contains("cudaMemcpy")) {
-      if (CI->arg_size() >= 4) {
-        if (auto *Mode = dyn_cast<ConstantInt>(CI->getArgOperand(3))) {
-          Value *DstStorage = extractMappedPtrStorage(CI->getArgOperand(0));
-          Value *SrcStorage = extractMappedPtrStorage(CI->getArgOperand(1));
-          if (DstStorage && SrcStorage) {
-            Type *DstTy = DstStorage->getType();
-            Type *SrcTy = SrcStorage->getType();
-            int64_t mapMode = Mode->getSExtValue();
-            if (auto *DstPtrTy = dyn_cast<PointerType>(DstTy)) {
-              if (auto *SrcPtrTy = dyn_cast<PointerType>(SrcTy)) {
-                Type *DstElemTy = DstPtrTy->getPointerElementType();
-                Type *SrcElemTy = SrcPtrTy->getPointerElementType();
-                if (mapMode == 1 && DstElemTy == SrcTy &&
-                    !SrcElemTy->isPointerTy()) {
-                  errs() << "ANDREW: fallback-lowering scalar cudaMemcpy mode 1 "
-                         << "dst=" << *DstStorage << " src=" << *SrcStorage
-                         << "\n";
-                  Out << "  *" << GetValueName(DstStorage) << " = "
-                      << GetValueName(SrcStorage)
-                      << "; /* scalar cudaMemcpy fallback mode 1 */\n";
-                  return;
-                }
-                if (mapMode == 2 && SrcElemTy == DstTy &&
-                    !DstElemTy->isPointerTy()) {
-                  errs() << "ANDREW: fallback-lowering scalar cudaMemcpy mode 2 "
-                         << "dst=" << *DstStorage << " src=" << *SrcStorage
-                         << "\n";
-                  Out << "  " << GetValueName(DstStorage) << " = *"
-                      << GetValueName(SrcStorage)
-                      << "; /* scalar cudaMemcpy fallback mode 2 */\n";
-                  return;
-                }
-              }
-            }
-            errs() << "ANDREW: dropping non-scalar cudaMemcpy in C emission: "
-                   << *CI << "\n";
-          }
-        }
-      }
+    if (CI->getCalledFunction()->getName() == "cudaMemcpy") {
       return;
     }
   }
@@ -8416,22 +8351,13 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
     return;
   if (deadInsts.find(I) != deadInsts.end())
     return;
-  if (emitOpenMPAtomicForInst(I))
-    return;
-  bool emitsLHS =
-      !I->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I);
-  // Skip side-effect-free expressions that would only emit as no-op statements.
-  if (!emitsLHS && !I->mayHaveSideEffects())
-    return;
   Out << "  ";
-  if (emitsLHS) {
+  if (!(&*I)->user_empty() && !isEmptyType(I->getType()) && !isInlineAsm(*I)) {
     auto varName = GetValueName(&*I, true);
-    if (canDeclareLocalLate(*I) && !isIVIncrement(I) && !isExtraIVIncrement(I)) {
-      if (declaredLocals.find(varName) == declaredLocals.end()) {
-        errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
-        printTypeName(Out, I->getType(), false) << ' ';
-        declaredLocals.insert(varName);
-      }
+    if (canDeclareLocalLate(*I) && !isIVIncrement(I)) {
+      errs() << "SUSAN: printing type name for " << varName << " at 6805\n";
+      printTypeName(Out, I->getType(), false) << ' ';
+      declaredLocals.insert(varName);
     }
     Out << GetValueName(&*I) << " = ";
   }
@@ -8440,7 +8366,6 @@ void CWriter::printInstruction(Instruction *I, bool printSemiColon) {
   if (printSemiColon)
     Out << ";\n";
 }
-
 void CWriter::keepIVUnrelatedInsts(
     BasicBlock *skipBB, Instruction *condInst,
     std::set<Instruction *> &InstsKeptFromSkipBlock) {
@@ -8635,7 +8560,25 @@ void CWriter::printPHIsIfNecessary(BasicBlock *BB) {
       }
       if (isa<Instruction>(incomingVal) || isa<Argument>(incomingVal)) {
         auto incomingName = GetValueName(incomingVal);
-        if (!incomingName.empty() && incomingName == varName) {
+        // Be conservative when suppressing PHI edge copies:
+        // IR naming can intentionally coalesce related values (e.g. loads and
+        // their PHI), so name equality alone is not enough to prove a true
+        // no-op assignment.
+        bool isSafeNoOpCarrier =
+            isa<PHINode>(incomingVal) || isa<Argument>(incomingVal);
+        // Non-load instructions (e.g. arithmetic like %dec) that already
+        // materialize into the same C variable name are typically true no-op
+        // PHI edge updates and can be elided to avoid duplicate "x = x;".
+        if (!isSafeNoOpCarrier && isa<Instruction>(incomingVal) &&
+            !isa<LoadInst>(incomingVal) && !incomingName.empty() &&
+            incomingName == varName) {
+          errs() << "CBE_DEBUG: skipping non-load no-op PHI copy for "
+                 << BB->getParent()->getName() << "::" << BB->getName()
+                 << " var=" << varName << "\n";
+          continue;
+        }
+        if (isSafeNoOpCarrier && !incomingName.empty() &&
+            incomingName == varName) {
           errs() << "CBE_DEBUG: skipping no-op PHI copy for "
                  << BB->getParent()->getName() << "::" << BB->getName()
                  << " var=" << varName << "\n";
@@ -10744,6 +10687,21 @@ bool CWriter::RunAllAnalysis(Function &F) {
   SE = &getAnalysis<ScalarEvolutionWrapperPass>(F).getSE();
   LI = &getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
   AA = &getAnalysis<AAResultsWrapperPass>(F).getAAResults();
+  std::set<LoopProfile *> refreshedLoopProfiles;
+  for (auto LP : LoopProfiles) {
+    if (!LP || !LP->LoopHeader)
+      continue;
+    Loop *ResolvedLoop = LI->getLoopFor(LP->LoopHeader);
+    if (!ResolvedLoop) {
+      errs() << "ANDREW: dropping stale LoopProfile for header "
+             << LP->LoopHeader->getName() << "\n";
+      continue;
+    }
+    LP->L = ResolvedLoop;
+    LP->LoopHeader = ResolvedLoop->getHeader();
+    refreshedLoopProfiles.insert(LP);
+  }
+  LoopProfiles.swap(refreshedLoopProfiles);
   // SUSAN: determine whether the function can be compiled without gotos
   std::set<BasicBlock *> visitedBBs;
   markIfBranches(F, &visitedBBs); // 2
@@ -10821,6 +10779,7 @@ void CWriter::runAnalysisOnKernelCaller(Function &F) {
   DevVarDecls.clear();
   KernelCallDims.clear();
   LiveOuts.clear();
+  MergedHostDeviceMode = false;
   std::map<CallInst *, std::map<Value *, Value *>> CallArgsMap;
 
   for (auto &BB : F) {
@@ -11044,42 +11003,66 @@ void CWriter::visitCallInst(CallInst &I) {
     if (F->getName() == "__kmpc_barrier")
       return;
 
+  bool hasMergedSafeDecision = false;
+  if (MDNode *mergedSafeMD = I.getMetadata("tulip.cudamemcpy.merged_safe")) {
+    hasMergedSafeDecision = true;
+    bool mergedSafe = false;
+    if (mergedSafeMD->getNumOperands() > 0) {
+      if (auto *S = dyn_cast_or_null<MDString>(mergedSafeMD->getOperand(0))) {
+        StringRef V = S->getString();
+        mergedSafe = (V == "true" || V == "1");
+      } else {
+        // Non-string payloads are treated as affirmative for compatibility.
+        mergedSafe = true;
+      }
+    }
+    if (mergedSafe)
+      MergedHostDeviceMode = true;
+  }
+  if (!hasMergedSafeDecision &&
+      (I.getMetadata("tulip.target.mapdata.to") ||
+       I.getMetadata("tulip.target.mapdata.from") ||
+       I.getMetadata("tulip.cudamemcpy.direction") ||
+       I.getMetadata("tulip.cudamemcpy.size") ||
+       I.getMetadata("tulip.cudamemcpy.original") ||
+       I.getMetadata("tulip.cudamemcpy.device"))) {
+    MergedHostDeviceMode = true;
+  }
+
   // Runtime memcpy calls should be lowered/erased in Tulip passes and
   // must not leak into emitted C.
   if (Function *F = I.getCalledFunction())
     if (F->getName().contains("cudaMemcpy"))
       return;
 
-  if (I.getMetadata("tulip.target.mapdata.to") ||
-      I.getMetadata("tulip.target.mapdata.from")) {
-  }
-
   if (I.getMetadata("tulip.kernel.region.begin")) {
-    for (auto devVar : DevVarDecls) {
-      Out << *devVar.second->getType() << " " << devVar.first << ";\n";
+    if (!MergedHostDeviceMode) {
+      for (auto devVar : DevVarDecls) {
+        Out << *devVar.second->getType() << " " << devVar.first << ";\n";
+      }
+      Out << "\n";
+      // FIXME: make sure deref is correct
+      // FIXME: assuming type is not safe...
+      // TODO: how to get size across functions?
+      for (auto devVar : DevVarDecls) {
+        auto *ty = devVar.second->getType();
+        if (auto ptrTy = dyn_cast<PointerType>(ty))
+          ty = ptrTy->getPointerElementType();
+        Out << "cudaMalloc(&" << devVar.first << ", " << "size_"
+            << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
+      }
+      Out << "\n";
+      for (auto devVar : DevVarDecls) {
+        auto *ty = devVar.second->getType();
+        if (auto ptrTy = dyn_cast<PointerType>(ty))
+          ty = ptrTy->getPointerElementType();
+        Out << "cudaMemcpy(" << devVar.first << ", "
+            << GetValueName(devVar.second) << ", "
+            << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty
+            << "), " << "cudaMemcpyHostToDevice);\n";
+      }
+      Out << "\n";
     }
-    Out << "\n";
-    // FIXME: make sure deref is correct
-    // FIXME: assuming type is not safe...
-    // TODO: how to get size across functions?
-    for (auto devVar : DevVarDecls) {
-      auto *ty = devVar.second->getType();
-      if (auto ptrTy = dyn_cast<PointerType>(ty))
-        ty = ptrTy->getPointerElementType();
-      Out << "cudaMalloc(&" << devVar.first << ", " << "size_"
-          << GetValueName(devVar.second) << "*sizeof(" << *ty << "));\n";
-    }
-    Out << "\n";
-    for (auto devVar : DevVarDecls) {
-      auto *ty = devVar.second->getType();
-      if (auto ptrTy = dyn_cast<PointerType>(ty))
-        ty = ptrTy->getPointerElementType();
-      Out << "cudaMemcpy(" << devVar.first << ", "
-          << GetValueName(devVar.second) << ", "
-          << "size_" << GetValueName(devVar.second) << "*sizeof(" << *ty
-          << "), " << "cudaMemcpyHostToDevice);\n";
-    }
-    Out << "\n";
   }
 
   /*
@@ -11391,7 +11374,7 @@ void CWriter::visitCallInst(CallInst &I) {
   else
     Out << ")";
 
-  if (I.getMetadata("tulip.kernel.region.end")) {
+  if (I.getMetadata("tulip.kernel.region.end") && !MergedHostDeviceMode) {
     Out << "\n";
     for (auto devVar : DevVarDecls) {
       // FIXME: use writeOperand instead of GetValueName directly

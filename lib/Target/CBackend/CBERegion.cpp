@@ -1474,9 +1474,11 @@ void LoopRegion::printRegionDAG() {
           }
           std::string phiName = cw->GetValueName(phi);
           if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            // Only skip a name-equal incoming when it is another PHI alias.
+            // Computed incoming values (casts/math) can legitimately carry the
+            // next loop state even if IR naming coalesces to the same C name.
             if (cw->GetValueName(incomingVal) == phiName &&
-                !cw->isIVIncrement(incomingInst) &&
-                !isa<BinaryOperator>(incomingInst)) {
+                isa<PHINode>(incomingInst)) {
               errs() << "ANDREW: Skipping duplicate PHI update by stable-name match: "
                      << *phi << "\n";
               break;
@@ -1622,9 +1624,11 @@ void LoopRegion::printDoWhileLoop() {
           if (incomingVal == phi) continue;
           std::string phiName = cw->GetValueName(phi);
           if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            // Only skip a name-equal incoming when it is another PHI alias.
+            // Computed incoming values (casts/math) can legitimately carry the
+            // next loop state even if IR naming coalesces to the same C name.
             if (cw->GetValueName(incomingVal) == phiName &&
-                !cw->isIVIncrement(incomingInst) &&
-                !isa<BinaryOperator>(incomingInst)) {
+                isa<PHINode>(incomingInst)) {
               errs() << "ANDREW: Skipping duplicate do-while PHI update by stable-name match: "
                      << *phi << "\n";
               break;
@@ -1904,9 +1908,11 @@ void LoopRegion::printWhileLoop() {
           }
           std::string phiName = cw->GetValueName(phi);
           if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            // Only skip a name-equal incoming when it is another PHI alias.
+            // Computed incoming values (casts/math) can legitimately carry the
+            // next loop state even if IR naming coalesces to the same C name.
             if (cw->GetValueName(incomingVal) == phiName &&
-                !cw->isIVIncrement(incomingInst) &&
-                !isa<BinaryOperator>(incomingInst)) {
+                isa<PHINode>(incomingInst)) {
               errs() << "ANDREW: Skipping duplicate while PHI update by stable-name match: "
                      << *phi << "\n";
               break;
@@ -2109,9 +2115,11 @@ void LoopRegion::printWhileLoopWithContinue() {
           }
           std::string phiName = cw->GetValueName(phi);
           if (Instruction *incomingInst = dyn_cast<Instruction>(incomingVal)) {
+            // Only skip a name-equal incoming when it is another PHI alias.
+            // Computed incoming values (casts/math) can legitimately carry the
+            // next loop state even if IR naming coalesces to the same C name.
             if (cw->GetValueName(incomingVal) == phiName &&
-                !cw->isIVIncrement(incomingInst) &&
-                !isa<BinaryOperator>(incomingInst)) {
+                isa<PHINode>(incomingInst)) {
               errs() << "ANDREW: Skipping duplicate whileWithContinue PHI update by stable-name match: "
                      << *phi << "\n";
               break;

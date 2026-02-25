@@ -71,6 +71,7 @@ typedef struct CBERegion{
 
 typedef struct LoopProfile{
   Loop *L;
+  BasicBlock *LoopHeader;
   Value *ub;
   int ubOffset;
   Value *lb;
@@ -153,6 +154,7 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
   std::map<CallInst*, std::pair<int, std::pair<std::string, Value*>>> KernelCallDims;
   std::map<std::string, Value*> DevVarDecls; 
   std::set<Value*> LiveOuts;
+  bool MergedHostDeviceMode = false;
 
   //SUSAN: tables not need to be saved when inlining
   std::map<Value*, std::string> inlinedArgNames;
