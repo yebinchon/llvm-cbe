@@ -1,0 +1,285 @@
+# **Memory Consistency Models and Concurrent Event Visualization: A Unified Architectural Framework**
+
+## **Introduction to Concurrent Memory Semantics and Execution Orderings**
+
+The foundation of modern high-performance computing relies entirely on the capability of multiprocessor systems to execute instructions concurrently. However, the physical reality of parallel execution diverges significantly from the idealized abstraction of a single, monolithic memory array accessed sequentially. To mitigate the latency of main memory and maximize instruction throughput, modern microarchitectures deploy complex hierarchies of coherent caches, thread-local store buffers, speculative execution engines, and out-of-order execution pipelines. While these optimizations are architecturally invisible to a single-threaded program, they manifest as observable phenomena in multi-threaded environments, where operations issued by one processor may appear to execute out of sequence from the perspective of another.1
+
+The formal contract that defines the permissible orderings of memory operations—and dictates how and when the effects of memory reads (loads) and writes (stores) become globally visible—is known as a memory consistency model. The strictest functional model, Sequential Consistency (SC), mandates that all memory operations appear to execute in a globally linear order that directly corresponds to the program order of each individual hardware thread.4 While mathematically intuitive for developers, enforcing Sequential Consistency requires severe restrictions on hardware optimizations, fundamentally stalling processor pipelines upon every memory mutation to ensure instantaneous global visibility.1 To circumvent these performance bottlenecks, hardware vendors implement weak or relaxed memory models.8 These models deliberately abandon strict global linearity, permitting hardware and compilers to aggressively reorder independent memory operations to optimize data flow.6
+
+The adoption of relaxed memory models introduces profound complexity into concurrent software engineering. Code lacking explicit synchronization mechanisms may fall victim to subtle, non-deterministic data races, where the sequence of operations observed during execution violates the programmer's intent.5 To restore necessary execution ordering, Instruction Set Architectures (ISAs) provide explicit synchronization primitives, including memory barriers (fences), acquire-release semantics, and atomic read-modify-write instructions. The precise microarchitectural implementation and mathematical axioms governing these primitives vary drastically across different processing architectures.6
+
+This report provides an exhaustive, comparative analysis of the memory consistency models governing four predominant hardware architectures: x86, ARMv8, RISC-V, and NVIDIA PTX. By deconstructing their operational and axiomatic rules, this analysis translates their disparate microarchitectural constraints into a unified data schema. Furthermore, this report establishes a comprehensive software architecture for an interactive, real-time visualizer capable of interpreting this unified data schema via JavaScript Object Notation (JSON). Utilizing modern web-rendering libraries, the proposed visualization engine translates mathematical happens-before relationships into fluid, animated execution timelines, providing an indispensable mechanism for observing and debugging concurrent event orderings.
+
+## **Microarchitectural Memory Consistency Models**
+
+## **The x86 Architecture: Total Store Order and Store Buffering Mechanics**
+
+The x86 architecture, which dominates the desktop and enterprise server markets, implements a memory consistency model broadly categorized as Total Store Order (TSO).10 For decades, the precise semantics of the x86 memory model were governed by ambiguous prose in vendor manuals, leading to widespread confusion regarding the legality of certain concurrent behaviors.12 Subsequent academic and industrial collaboration resulted in the formalization of x86-TSO, providing a mathematically precise axiomatic framework and an intuitive operational abstract machine that accurately reflects the behavior of physical Intel and AMD microprocessors.12
+
+At the core of the x86-TSO operational model is the hardware-local First-In-First-Out (FIFO) write buffer, commonly referred to as the store buffer. When an x86 processor executes a store instruction, the data is not immediately broadcast to the globally coherent L1 data cache.15 Instead, the store is enqueued within the processor's local store buffer, allowing the instruction pipeline to retire the write operation and continue executing subsequent instructions without stalling for the cache coherence protocol to invalidate remote cache lines.15 The stores residing in this buffer are eventually drained to the main coherent memory system strictly in the order they were issued, thereby guaranteeing a total global ordering of all stores across the system.1
+
+The critical relaxation introduced by the x86-TSO model revolves around the interaction between this store buffer and subsequent load operations. If an x86 processor executes a load instruction targeting a memory address that currently possesses a pending, uncommitted write within its local store buffer, the processor utilizes Store-to-Load Forwarding (STLF) to satisfy the read directly from the buffer.15 This microarchitectural shortcut allows a thread to observe its own writes before they become visible to any other hardware thread in the system. Consequently, x86-TSO strictly enforces Write-to-Write (W→W), Read-to-Read (R→R), and Read-to-Write (R→W) program orderings, but explicitly permits Write-to-Read (W→R) reordering, provided the write and the read target distinct physical memory addresses.10
+
+This specific W→R relaxation manifests in the classic Store Buffering (SB) litmus test. If two independent threads concurrently write to separate memory locations and subsequently attempt to read the other thread's location, the store buffers may delay the global visibility of both writes. As a result, both threads may read the stale initial values from the coherent cache, an outcome strictly forbidden under Sequential Consistency but completely legal under x86-TSO.7
+
+To prevent such reorderings when absolute determinism is required, the x86 ISA provides explicit barrier instructions. The MFENCE (Memory Fence) instruction acts as a full serialization point, halting the execution pipeline until the local store buffer is completely flushed to the globally observable cache, ensuring that all preceding writes are globally visible before any subsequent reads are issued.19 Additionally, atomic read-modify-write operations prefixed with the LOCK modifier (such as a locked XCHG instruction) enforce a total global order by seizing exclusive ownership of the target cache line and flushing the store buffer, functionally doubling as a full memory barrier and preventing Independent Reads of Independent Writes (IRIW) anomalies.19
+
+## **ARMv8: Multicopy Atomicity and Acquire-Release Semantics**
+
+The evolution of the ARM architecture from ARMv7 to ARMv8 represents one of the most significant paradigm shifts in modern memory consistency design. Earlier iterations of the ARM architecture employed a profoundly weak, non-multicopy-atomic memory model, sharing conceptual similarities with the IBM POWER architecture.21 In those legacy systems, a store operation could become visible to a subset of processors before becoming visible to the entire system, allowing complex, hierarchical topologies to optimize cache snooping and propagation.23 However, this non-multicopy-atomic flexibility introduced immense complexity for compiler writers and verification engineers, leading to behaviors where independent threads could fundamentally disagree on the chronological order of two independent stores.22
+
+Recognizing that the theoretical microarchitectural benefits of non-multicopy atomicity were rarely exploited in physical silicon, the ARMv8 architecture was revised to strictly enforce an "Other-multi-copy atomic" model.23 Under the ARMv8 specification, all writes to a specific memory location are globally serialized.26 While a specific processing element is permitted to observe its own writes early via a private write buffer (similar to the x86 STLF mechanism), once a write becomes visible to any *other* observer in the system, it is instantaneously guaranteed to be visible to all observers.26 This architectural revision fundamentally eliminates the convoluted IRIW (Independent Readers of Independent Writers) anomalies permitted under ARMv7, providing a more robust foundation for concurrent reasoning.22
+
+Beyond its atomic visibility guarantees, ARMv8 differentiates its memory model through the integration of first-class Acquire-Release synchronization primitives, explicitly designed to support the C11 and C++11 Release Consistency models without the performance penalties of heavy system barriers.26 The architecture introduces specific half-barrier instructions: Load-Acquire (LDAR) and Store-Release (STLR).26
+
+The mathematical semantics of these instructions are meticulously defined to constrain hardware reordering.26 A Load-Acquire instruction applies acquire semantics to a read operation from shared memory, strictly preventing the microarchitecture from reordering the read-acquire with any subsequent read or write operations that follow it in the program order.26 Conversely, a Store-Release instruction applies release semantics to a write operation, guaranteeing that all preceding memory operations appearing before the store-release in the program order are completely observed by the system before the store-release itself becomes visible.26
+
+When a Load-Acquire operation follows a Store-Release operation in the program order, ARMv8 enforces Release Consistency sequentially consistent (RCsc) semantics.26 This dictates that the memory access generated by the Store-Release must be globally observed before the access generated by the Load-Acquire, forcing all threads to achieve a synchronized agreement regarding the state of shared memory.26 To provide further optimization capabilities, the ARMv8.3-A revision introduced the LDAPR (Load-AcquirePC) instruction, which supports a weaker Processor Consistent (RCpc) model.25 The LDAPR instruction drops the strict requirement that it must wait for preceding store-releases to be globally observed, permitting Store-Load reordering even in the presence of release boundaries, thereby minimizing pipeline stalls while preserving safe message-passing idioms.25
+
+## **RISC-V: Weak Memory Ordering (RVWMO) and Preserved Program Order**
+
+The open-standard RISC-V Instruction Set Architecture is designed to scale across a vast spectrum of computing environments, from deeply embedded, energy-constrained microcontrollers to highly aggressive, out-of-order application processors utilized in high-performance computing. To accommodate this diverse implementation landscape, RISC-V establishes a highly flexible baseline memory model known as RISC-V Weak Memory Ordering (RVWMO).30
+
+Unlike x86-TSO, which is defined heavily by operational structures like store buffers, RVWMO is primarily formalized through an axiomatic specification.31 The model posits the existence of a Global Memory Order, representing a non-deterministic total ordering of all primitive load and store operations produced by all hardware threads (harts) participating in the execution.33 For an execution trace to be deemed legal under RVWMO, its corresponding Global Memory Order must strictly adhere to a defined set of constraints known as Preserved Program Order (PPO), alongside three foundational mathematical axioms.31
+
+The Preserved Program Order outlines the exact scenarios under which the microarchitecture is forbidden from reordering two instructions issued by the same hart. If memory operation ![][image1] precedes memory operation ![][image2] in the program order, and they match specific dependency criteria, ![][image1] must precede ![][image2] in the Global Memory Order. RVWMO categorizes these PPO rules into several distinct domains 31:
+
+1. **Overlapping Address Orderings:** The hardware must preserve the order of operations that target overlapping physical memory footprints. If a load operation precedes a store operation to the same byte, the load must determine its value before the store becomes globally visible. Similarly, stores to the same address must be serialized to ensure memory coherence.31  
+2. **Syntactic Dependencies:** RVWMO rigorously tracks Address, Data, and Control dependencies at the register level. If the target memory address or the data payload of operation ![][image2] mathematically relies on the value retrieved by a preceding load ![][image1], an address or data dependency exists, and reordering is strictly prohibited.31 Control dependencies enforce ordering when a conditional branch relies on the outcome of a load, but uniquely under RVWMO, this dependency only preserves ordering if the subsequent operation ![][image2] is a store instruction, allowing subsequent loads to be speculatively executed.31  
+3. **Explicit Fences:** The FENCE instruction provides explicit synchronization, allowing developers to manually inject PPO constraints. A FENCE instruction can be customized with predecessor and successor bits (e.g., ordering prior reads against subsequent writes), providing granular control over pipeline serialization.31  
+4. **Acquire and Release Annotations:** Similar to the ARMv8 paradigm, RISC-V allows atomic operations (AMOs) and Load-Reserved/Store-Conditional (LR/SC) paired instructions to be annotated with .aq (acquire) and .rl (release) bits. These annotations dynamically generate RCsc ordering constraints, preventing the reordering of critical section memory accesses.31
+
+Any proposed Global Memory Order that satisfies the PPO rules must subsequently be validated against three immutable axioms to be considered a legal execution 33:
+
+* **The Load Value Axiom:** This axiom dictates that every byte read by a load instruction must strictly reflect the value written by the store instruction that is the most recent in the Global Memory Order among all stores that precede the load in either the Global Memory Order or the thread's local program order. This axiom inherently governs the legality of store-to-load forwarding mechanisms.33  
+* **The Atomicity Axiom:** This rule preserves the integrity of atomic read-modify-write sequences. If an aligned Load-Reserved (LR) and Store-Conditional (SC) pair successfully executes, the Atomicity Axiom guarantees that no store from any other hart in the system can intervene in the Global Memory Order between the load and the store to the targeted bytes.33  
+* **The Progress Axiom:** Serving as a liveness guarantee, this axiom states that no memory operation can be preceded in the Global Memory Order by an infinitely long sequence of other memory operations, ensuring that the cache coherence protocol eventually propagates all writes to the global state.33
+
+To accommodate software ported from historically stricter architectures like x86, the RISC-V specification optionally defines the RVTSO (Total Store Ordering) extension. When implemented, RVTSO functionally elevates the baseline PPO rules to inherently forbid Read-to-Read and Write-to-Write reorderings globally, rendering the execution environment substantially stronger. However, standard development guidelines heavily discourage developers from writing software that solely relies on RVTSO semantics, as such binaries will execute unpredictably on the broader ecosystem of standard RVWMO hardware.30
+
+## **NVIDIA PTX: Scoped Synchronization and Distinct Memory Proxies**
+
+The Parallel Thread Execution (PTX) virtual Instruction Set Architecture utilized by NVIDIA Graphics Processing Units (GPUs) implements a memory consistency model that deviates radically from traditional CPU architectures. While CPUs typically model the memory subsystem as a singular, universally coherent domain, the PTX model is designed to orchestrate concurrency across tens of thousands of simultaneous, highly divergent threads. To achieve this, the PTX consistency model introduces deeply hierarchical concepts known as Scoped Synchronization and Memory Proxies, explicitly discarding the requirement for Data Race Freedom (DRF).39
+
+Under the PTX specification, the visibility of a memory operation is not inherently global. Instead, every strong memory operation (such as a fence or an atomic instruction) must explicitly declare a scope, which geometrically bounds the subset of threads that are permitted to interact with the operation and establish happens-before relations.40 The PTX architecture delineates four primary synchronization scopes:
+
+* **.cta (Cooperative Thread Array):** The most granular architectural scope, encompassing all threads executing within the same threadblock. The hardware warp is explicitly not recognized as a valid synchronization scope within the memory model.40  
+* **.cluster:** Introduced in newer microarchitectures (such as Hopper and Blackwell), this scope extends visibility to all threads executing within a localized cluster of CTAs.40  
+* **.gpu:** This scope enforces visibility across all threads executing on a single physical compute device, including threads belonging to entirely separate kernel grids invoked by the host application.40  
+* **.sys:** The broadest architectural scope, encompassing all threads across multiple interconnected GPUs and the host CPU itself.40
+
+For an execution ordering to be established between two synchronizing operations, the operations must be mathematically categorized as *morally strong* relative to one another.41 Two operations achieve moral strength if they satisfy stringent inclusion criteria: they must either be related by program order (executed by the exact same thread), or both operations must be strong, explicitly scoped operations where the declared scope of each operation encompasses the thread executing the counterpart.41 For example, if Thread A executes a .cta scoped release operation, and Thread B (residing in a completely different CTA) executes a .gpu scoped acquire operation, the two operations lack moral strength. Because Thread B falls outside the .cta boundary declared by Thread A, no synchronization relation is mathematically established, and the operations may be freely reordered by the hardware.41
+
+Furthermore, the PTX memory model uniquely accommodates the specialized, heterogeneous nature of GPU memory subsystems through the concept of *proxies*. A proxy serves as an abstract label denoting a specific hardware pathway or method of memory access.41 Standard global memory reads and writes utilize the generic proxy. However, operations leveraging specialized hardware—such as texture sampling caches, surface loads, or asynchronous copy engines—utilize entirely distinct memory proxies.41
+
+The PTX architecture explicitly states that operations executed across distinct proxies are entirely uncoordinated and non-coherent, even if they target the exact same physical memory location.41 Even the use of virtual aliases—where two distinct virtual addresses map to the identical physical address—behaves mathematically as if the memory is being accessed via separate proxies.41 To establish ordering or coherence across these divergent hardware pathways, developers must utilize specialized proxy fences to manually synchronize the distinct caching hierarchies.41
+
+Unlike the C++11 memory model, which classifies any execution containing a data race as exhibiting Undefined Behavior, the PTX architecture provides rigorous deterministic guarantees for specific classifications of data races. Two overlapping memory operations conflict if at least one is a write.43 If these conflicting operations lack both a causal relationship and moral strength, a data race occurs.43 While mixed-size data races (e.g., a 4-byte write colliding with an overlapping 8-byte read) yield undefined states, PTX mathematically defines the outcomes of uniform-size data races.43 This deliberate relaxation permits expert GPU developers to craft highly specialized, non-blocking parallel algorithms that safely leverage benign data races without violating the fundamental axioms of the architecture.39
+
+## **Unified Concurrency Event Data Schema**
+
+The sheer disparity between x86-TSO store buffers, ARMv8 multicopy atomicity, RISC-V dependency tracking, and NVGPU scoped proxies necessitates the creation of a highly extensible abstraction layer to model concurrent execution traces. To fulfill the requirements of the visualization project, a standardized JSON schema must be constructed to capture the chronological sequence of events, their specific architectural tags, and the subsequently evaluated happens-before graphs.47
+
+The provided project specification utilizes a message-passing nomenclature (e.g., SEND, RECV) to denote event ordering:
+
+JSON
+
+However, hardware memory consistency models are fundamentally shared-memory models, not pure message-passing models. In a shared-memory paradigm, a SEND functionally maps to a memory STORE to a specific memory address, while a RECV maps to a memory LOAD from that exact address that successfully observes the stored value (a relation formally known as Reads-From or RF).27
+
+To unify the requested input format with the rigorous requirements of formal memory model validation, the JSON input schema must be mathematically expanded. The unified schema introduces architectural modifiers that permit the translation of abstract events into machine-level operations, accommodating both simplified messaging traces and complex litmus tests used by verification tools like Herd7.48
+
+## **Table 1: Unified Event Node Input Schema**
+
+| JSON Key | Data Type | Requirement | Description and Architectural Context |
+| :---- | :---- | :---- | :---- |
+| id | String | Mandatory | A unique alphanumeric identifier for the specific event in the trace. |
+| pid | String | Mandatory | The Process or Hardware Thread identifier (e.g., P1, Hart\_0, CTA1\_T2). |
+| event | Enum | Mandatory | Must be LOCAL, SEND, RECV, STORE, LOAD, RMW, or FENCE. |
+| ts | Integer | Mandatory | The initial logical or physical timestamp representing the issue order. |
+| to / from | String | Conditional | Valid only for SEND/RECV events. Indicates the targeted pid. |
+| send\_id | String | Conditional | Valid only for RECV events. The id of the specific SEND event being observed. |
+| address | String | Conditional | Valid only for memory events (STORE, LOAD, RMW). Hexadecimal memory location. |
+| value | String | Conditional | The data payload written or read. Mandatory for memory events to trace coherence. |
+| arch\_tags | Object | Optional | A highly critical polymorphic dictionary containing hardware-specific constraints. |
+
+The arch\_tags object functions as the mathematical bridge to the memory consistency evaluation engine. It allows the schema to inject the nuanced rules of the selected architecture into the raw event stream:
+
+* ordering: Defines explicit synchronization semantics. Accepts values such as RELAXED, ACQUIRE, RELEASE, SEQ\_CST. Maps directly to ARMv8 LDAR/STLR and RISC-V .aq/.rl annotations.26  
+* scope: Defines the geometric bounds of the synchronization. Accepts CTA, CLUSTER, GPU, SYS. Strictly required for NVIDIA PTX operations.40  
+* proxy: Defines the hardware caching pathway. Accepts GENERIC, TEXTURE, SURFACE. Required for modeling PTX non-coherent proxies.41  
+* dependency: An array linking the current event id to preceding event ids via specific register pathways (e.g., \`\` for address dependency). Crucial for evaluating RISC-V PPO rules.31
+
+By applying this unified schema, the user's conceptual example can be automatically translated into a rigorous shared-memory trace. A SEND becomes a STORE with RELEASE semantics, and a RECV becomes a LOAD with ACQUIRE semantics, establishing a formal happens-before relationship across the threads.
+
+## **Mathematical Evaluation and Output Schema**
+
+Upon receiving the unified JSON input trace, the visualization engine cannot merely plot the events chronologically based on the provided ts integers. The arbitrary issue timestamps do not reflect the microarchitectural reality of relaxed memory models. The system must process the trace through a formal Evaluation Engine—functionally similar to the algorithmic solvers used in Alloy or Herd7—to construct a valid happens-before (![][image3]) directed acyclic graph (DAG).48
+
+## **The Evaluation Pipeline**
+
+1. **Program Order (PO) Construction:** The engine groups all events by their pid and sorts them by their initial ts. It constructs vertical PO edges between sequential events within the same thread.48  
+2. **Relation Mapping:** The engine scans the trace for inter-thread communication.  
+   * For explicitly linked SEND/RECV pairs, it draws a direct communication edge.  
+   * For STORE/LOAD pairs, it constructs a Reads-From (RF) edge connecting a store to the load that observed its specific value at a shared address.27  
+   * It calculates the Coherence Order (CO), ensuring a total serialization of all STORE operations to the same address across the entire system.27  
+   * It calculates From-Reads (FR) edges, logically connecting a LOAD to any STORE that occurs later in the coherence order than the store the load originally observed.27  
+3. **Axiomatic Validation:** The engine applies the specific ruleset of the selected architecture (e.g., x86-TSO, RVWMO). It evaluates whether the proposed edges violate architectural constraints. For example, if the engine detects a cyclic dependency involving an RVWMO Preserved Program Order (PPO) edge, the execution is flagged as illegal.31  
+4. **Logical Clock Normalization:** The engine recalculates the ts values using a topological sort of the validated DAG, transforming them into strict Lamport logical timestamps. This normalization ensures that if event ![][image1] happens before event ![][image2], the logical timestamp of ![][image1] is strictly less than ![][image2], establishing the precise animation sequence.52
+
+## **Table 2: Evaluated JSON Output Schema**
+
+The output generated by the evaluation engine provides the definitive blueprint for the visualization module. It explicitly lists the validated edges and the normalized temporal states of the system.
+
+| JSON Key | Data Type | Description and Visualization Function |
+| :---- | :---- | :---- |
+| metadata | Object | Contains the architecture utilized for evaluation, and a boolean is\_legal\_execution indicating if the trace violates the memory model. |
+| nodes | Array | The original event nodes, but with ts values replaced by topologically sorted Lamport logical timestamps determining animation frame execution. |
+| edges | Array | Objects containing source\_id, target\_id, and relation\_type (e.g., PO, RF, CO, PPO, MS). Dictates the SVG paths rendered on the canvas. |
+| state\_transitions | Array | Epoch-based snapshots. Groups nodes by their logical timestamps, detailing which architectural structures (e.g., store buffers, main memory) are mutated at each animation frame. |
+
+This output JSON directly satisfies the project specification by providing a logical, mathematically verified data structure that seamlessly supports any architectural memory model evaluated by the engine.
+
+## **Real-Time Animation and Visualization Architecture**
+
+Translating complex mathematical graphs into intelligible, real-time visual animations requires a highly modular software architecture. The traditional representation of concurrent traces via static Hasse diagrams or textual logs is profoundly inadequate for communicating the nuances of store buffers, cache hierarchies, and out-of-order execution.53 To meet the project requirements, the visualization engine must be designed as an interactive time-space diagram 55, built upon the integration of React Flow for spatial layout and D3.js for physics-based temporal animation.57
+
+## **Spatial Layout Scaffolding with React Flow**
+
+React Flow serves as the foundational DOM overlay, responsible for rendering the static scaffolding of the happens-before graph.60 Because memory models involve relationships spanning two primary dimensions—chronological progression (vertical) and inter-thread communication (horizontal)—the layout must be rigorously structured to prevent visual clutter.62
+
+Upon receiving the JSON Output payload, the React Flow implementation initializes a sequence of vertical boundaries, establishing a distinct "Thread Lane" for each unique pid present in the trace.57 Within each Thread Lane, the event nodes are plotted vertically, ordered strictly by their normalized Lamport logical timestamps.
+
+React Flow’s custom edge routing capabilities are leveraged to map the relations:
+
+* **Intra-thread Edges:** PO (Program Order) and PPO (Preserved Program Order) edges are rendered as solid, vertical directed lines exclusively within the bounds of a single Thread Lane.  
+* **Inter-thread Edges:** Dependencies such as RF (Reads-From) and CO (Coherence Order) are rendered as dashed, orthogonal bezier curves that span horizontally across the canvas, connecting distinct Thread Lanes.  
+* **Architectural Overlays:** For architectures like x86-TSO, the React Flow layout dynamically renders a secondary column adjacent to the Thread Lane, visually representing the hardware Store Buffer.14 For NVIDIA PTX, dynamic grouping boxes are rendered around specific subsets of Thread Lanes to visually denote .cta or .cluster synchronization scopes.40
+
+React Flow inherently manages the interactive viewport, allowing users to seamlessly pan, zoom, and inspect individual node metadata (such as hexadecimal addresses, data values, and architectural tags) via integrated context menus.60
+
+## **Temporal Animation Mechanics via D3.js**
+
+While React Flow constructs the static graph, the core requirement for *real-time process ordering animation* relies entirely on D3.js.58 D3.js bridges the gap between the static DOM and fluid temporal state changes, utilizing the d3-timer module to synchronize animations to the precise logical clocks computed by the evaluation engine.58
+
+The animation architecture abandons the simple highlighting of static edges. Instead, it utilizes a "Token Passing" paradigm.62 The execution of memory operations is visualized as discrete SVG tokens propagating through the physical hierarchy of the machine.
+
+The animation loop operates as follows:
+
+1. **Epoch Initialization:** The D3 timer initializes at logical timestamp 0\. It queries the state\_transitions array from the Output JSON to identify all nodes scheduled to execute in the current epoch.59  
+2. **Coordinate Extraction and Interpolation:** For each active event, D3 extracts the absolute (X, Y) coordinates of the source node and its target dependencies from the React Flow instance. Using d3.interpolate, it calculates the exact mathematical spline the token must follow.58  
+3. **Execution and Tweening:**  
+   * **LOCAL Events:** The node visually pulses, simulating independent ALU computation without memory bus interaction.  
+   * **SEND / STORE Events:** The source node emits a token. Under SC, the token travels immediately across the RF edge to the LOAD node. However, under weak models like x86-TSO, D3 tweens the token into the visually distinct Store Buffer lane.14 The token remains visually trapped in the buffer. If an intra-thread STLF (Store-to-Load Forwarding) edge exists, a secondary token instantly bridges from the buffer to a subsequent LOAD node within the same lane.15  
+   * **Synchronization Events:** When the timeline encounters an MFENCE (x86) or a STLR (ARMv8), the D3 timer triggers a release event. The tokens trapped in the Store Buffer are animated sequentially, draining out of the buffer and traveling horizontally into the "Main Memory" global lane, visually resolving the delayed CO and RF dependencies.19  
+4. **Logical Progression:** Once all tweening animations for the current logical timestamp complete, the D3 timer increments the clock and begins the next epoch, guaranteeing a synchronized, conflict-free visual playback.59
+
+This sophisticated use of animated staging and token staggering drastically reduces the cognitive load required to understand memory reordering. The visual divergence between the moment a thread issues a store (token enters buffer) and the delayed moment that store achieves global visibility (token drains to main memory) provides an immediate, intuitive explanation for the anomalous outcomes of weak memory litmus tests.64
+
+## **Collaborative Project Execution Strategy**
+
+Addressing the specified three-person group dynamic, the development of this unified memory model visualizer must be strategically partitioned to ensure parallel execution and modular integration. The architectural separation of the evaluation engine from the visualization frontend facilitates this division of labor.
+
+## **Person 1 & 2: Frontend Architecture and Primary Model Development**
+
+This duo is responsible for the core visual framework and the implementation of the first memory model (e.g., x86-TSO).
+
+* **Infrastructure:** They will initialize the React environment, implementing the React Flow canvas, configuring the Dagre/ELK layout algorithms for node positioning, and designing the CSS/SVG components for the Thread Lanes and Store Buffers.57  
+* **Interaction:** They will build the user interface controls, including the JSON input parser, the timeline playback scrubber (Play, Pause, Step), and the node-hover tooltips.61  
+* **Animation Engine:** They will write the complex D3.js d3-timer and interpolation logic required to move tokens along the React Flow edges.58  
+* **x86-TSO Engine:** They will implement the specific algorithmic solver that ingests the Unified JSON Input, calculates STLF capabilities, identifies MFENCE/LOCK barriers, and outputs the Evaluated JSON mapping the delayed W→R reorderings.12
+
+## **Person 3: Secondary Model Formalization and Schema Adaptation**
+
+This engineer operates as the formal verification specialist, responsible for implementing the second, significantly more complex memory model (e.g., RISC-V RVWMO or ARMv8).
+
+* **Engine Integration:** They will build a parallel solver module that hooks into the JSON processing pipeline. If implementing RVWMO, this engineer must write the recursive algorithms required to traverse the JSON array and identify syntactic Address, Data, and Control dependencies to establish the Preserved Program Order (PPO).31  
+* **Axiom Validation:** They will implement the mathematical checks for the Load Value and Atomicity axioms, ensuring that the solver correctly flags illegal execution traces and outputs the boolean is\_legal\_execution state to the metadata.33  
+* **Schema Extension:** They will ensure the unified JSON input/output schemas robustly handle advanced architectural tags (like .aq/.rl or .cta scopes) and verify that the output graphs mathematically resolve without requiring alterations to the core React Flow/D3 rendering logic built by Person 1 and 2\.40
+
+## **Synthesis and Architectural Implications**
+
+The formal specification of hardware memory consistency models is a critical prerequisite for the development of safe, deterministic concurrent software. Strict execution models like Sequential Consistency, while intuitive, impose severe microarchitectural bottlenecks that cripple the instruction throughput of modern superscalar processors.1 Consequently, the computing industry has uniformly pivoted toward weak or relaxed consistency models, exchanging simplified programming paradigms for aggressive hardware optimization.8
+
+The models governing dominant architectures diverge significantly in their implementation. The x86 architecture relies heavily on an operational Total Store Order model, utilizing thread-local store buffers to hide memory latency while permitting localized Write-to-Read reorderings via Store-to-Load Forwarding.15 The ARMv8 architecture, having deprecated its convoluted legacy non-multicopy-atomic behaviors, now enforces strict serialization of writes alongside highly optimized Acquire-Release semantics, granting developers surgical control over hardware pipelines without relying on draconian global barriers.25
+
+In contrast, the RISC-V architecture adopts a purely axiomatic approach, leveraging the RVWMO specification to track intricate syntactic dependencies, thereby mapping a subset of the local program order into a globally validated memory order.31 The NVIDIA PTX architecture entirely abandons universal coherence, orchestrating massive concurrency through explicit scoped synchronization boundaries and isolated memory proxies, deliberately sacrificing Data Race Freedom to maximize throughput.39
+
+The profound disparities between these architectures necessitate a unified abstraction layer for analysis and verification. By mathematically expanding basic message-passing concepts into a rigorously defined JSON schema, complex shared-memory semantics, coherence orders, and architectural barriers can be accurately captured.48 Processing this schema through an algorithmic evaluation engine generates a normalized, logical sequence of state transitions and validated happens-before relationships.27
+
+The translation of this verified data structure into an interactive visual paradigm represents a significant advancement in concurrency education and debugging. By integrating the hierarchical DOM layout capabilities of React Flow with the highly synchronized, physics-based animation loops of D3.js, abstract memory phenomena—such as the delayed draining of a store buffer or the simultaneous propagation of a multicopy-atomic write—are rendered as observable, tangible mechanics.57 This architecture provides software engineers and hardware verification teams with an indispensable mechanism for bridging the cognitive gap between formal axiomatic logic and observable microarchitectural execution.
+
+#### **Works cited**
+
+1. Total Store Ordering (TSO) \- Medium, accessed March 16, 2026, [https://medium.com/@CyberGee/total-store-ordering-tso-64ce0be8afe8](https://medium.com/@CyberGee/total-store-ordering-tso-64ce0be8afe8)  
+2. Memory Consistency and Event Ordering in Scalable Shared-Memory Multiprocessors, accessed March 16, 2026, [https://research.google/pubs/memory-consistency-and-event-ordering-in-scalable-shared-memory-multiprocessors/](https://research.google/pubs/memory-consistency-and-event-ordering-in-scalable-shared-memory-multiprocessors/)  
+3. Learn the architecture \- Memory Systems, Ordering, and Barriers \- Arm Developer, accessed March 16, 2026, [https://developer.arm.com/documentation/102336/latest/Memory-ordering](https://developer.arm.com/documentation/102336/latest/Memory-ordering)  
+4. Memory Consistency Models | Advanced Computer Architecture... \- Fiveable, accessed March 16, 2026, [https://fiveable.me/advanced-computer-architecture/unit-9/memory-consistency-models/study-guide/YUQNtdRVMM1C0c5j](https://fiveable.me/advanced-computer-architecture/unit-9/memory-consistency-models/study-guide/YUQNtdRVMM1C0c5j)  
+5. Trace Semantics and Algebraic Laws for Total Store Order Memory Model \- JCST, accessed March 16, 2026, [https://jcst.ict.ac.cn/fileup/1000-9000/PDF/2021-6-4-1616.pdf](https://jcst.ict.ac.cn/fileup/1000-9000/PDF/2021-6-4-1616.pdf)  
+6. Memory ordering \- Wikipedia, accessed March 16, 2026, [https://en.wikipedia.org/wiki/Memory\_ordering](https://en.wikipedia.org/wiki/Memory_ordering)  
+7. Memory Consistency Models: A Tutorial \- James Bornholt, accessed March 16, 2026, [https://jamesbornholt.com/blog/memory-models/](https://jamesbornholt.com/blog/memory-models/)  
+8. Automated Synthesis of Comprehensive Memory Model Litmus Test Suites | Research, accessed March 16, 2026, [https://research.nvidia.com/publication/2017-04\_automated-synthesis-comprehensive-memory-model-litmus-test-suites](https://research.nvidia.com/publication/2017-04_automated-synthesis-comprehensive-memory-model-litmus-test-suites)  
+9. Specifying and Verifying Programs Over the MCA ARMv8 Architecture with TLA+ | Journal of Circuits, Systems and Computers, accessed March 16, 2026, [https://www.worldscientific.com/doi/10.1142/S0218126625300089](https://www.worldscientific.com/doi/10.1142/S0218126625300089)  
+10. Memory Models Explained: How Threads Really See Memory \- DEV Community, accessed March 16, 2026, [https://dev.to/sachin\_tolay\_052a7e539e57/memory-models-explained-how-threads-really-see-memory-174l](https://dev.to/sachin_tolay_052a7e539e57/memory-models-explained-how-threads-really-see-memory-174l)  
+11. Weak Memory Model Formalisms: Introduction and Survey \- arXiv, accessed March 16, 2026, [https://arxiv.org/html/2508.04115v1](https://arxiv.org/html/2508.04115v1)  
+12. x86-TSO: a rigorous and usable programmer's model for x86 multiprocessors \- SpinRoot, accessed March 16, 2026, [https://spinroot.com/spin/Doc/course/x86\_tso.pdf](https://spinroot.com/spin/Doc/course/x86_tso.pdf)  
+13. A Better x86 Memory Model: x86-TSO \- University of Cambridge, accessed March 16, 2026, [https://www.cl.cam.ac.uk/\~pes20/weakmemory/x86tso-paper.tphols.pdf](https://www.cl.cam.ac.uk/~pes20/weakmemory/x86tso-paper.tphols.pdf)  
+14. Formal Specification of the x86 Instruction Set Architecture \- Universität des Saarlandes, accessed March 16, 2026, [https://www-wjp.cs.uni-saarland.de/publikationen/UD11.pdf](https://www-wjp.cs.uni-saarland.de/publikationen/UD11.pdf)  
+15. How does the x86 TSO memory consistency model work when some of the stores being observed come from store-forwarding? \- Stack Overflow, accessed March 16, 2026, [https://stackoverflow.com/questions/69925465/how-does-the-x86-tso-memory-consistency-model-work-when-some-of-the-stores-being](https://stackoverflow.com/questions/69925465/how-does-the-x86-tso-memory-consistency-model-work-when-some-of-the-stores-being)  
+16. Effective Program Verification for Relaxed Memory Models \- Microsoft, accessed March 16, 2026, [https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/chess-sober.pdf](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/chess-sober.pdf)  
+17. How do modern Intel x86 CPUs implement the total order over stores \- Stack Overflow, accessed March 16, 2026, [https://stackoverflow.com/questions/62465382/how-do-modern-intel-x86-cpus-implement-the-total-order-over-stores](https://stackoverflow.com/questions/62465382/how-do-modern-intel-x86-cpus-implement-the-total-order-over-stores)  
+18. Hardware Memory Reordering | CoffeeBeforeArch.github.io, accessed March 16, 2026, [https://coffeebeforearch.github.io/2020/11/29/hardware-memory-ordering.html](https://coffeebeforearch.github.io/2020/11/29/hardware-memory-ordering.html)  
+19. Hardware Memory Models: x86-TSO \- Rice University, accessed March 16, 2026, [https://www.cs.rice.edu/\~johnmc/comp522/lecture-notes/COMP522-2019-Lecture9-HW-MM.pdf](https://www.cs.rice.edu/~johnmc/comp522/lecture-notes/COMP522-2019-Lecture9-HW-MM.pdf)  
+20. A better x86 memory model: x86-TSO (extended version) \- University of Cambridge, accessed March 16, 2026, [https://www.cl.cam.ac.uk/\~pes20/weakmemory/x86tso-paper.pdf](https://www.cl.cam.ac.uk/~pes20/weakmemory/x86tso-paper.pdf)  
+21. The Semantics of Multicopy Atomic ARMv8 and RISC-V \- University of Cambridge, accessed March 16, 2026, [https://www.repository.cam.ac.uk/bitstreams/2ff373b8-c0d3-4f79-a50b-36f0c3ec4339/download](https://www.repository.cam.ac.uk/bitstreams/2ff373b8-c0d3-4f79-a50b-36f0c3ec4339/download)  
+22. Will two atomic writes to different locations in different threads always be seen in the same order by other threads? \- Stack Overflow, accessed March 16, 2026, [https://stackoverflow.com/questions/27807118/will-two-atomic-writes-to-different-locations-in-different-threads-always-be-see](https://stackoverflow.com/questions/27807118/will-two-atomic-writes-to-different-locations-in-different-threads-always-be-see)  
+23. Simplifying ARM Concurrency: Multicopy-Atomic Axiomatic and Operational Models for ARMv8 \- Department of Computer Science and Technology |, accessed March 16, 2026, [https://www.cl.cam.ac.uk/\~pes20/armv8-mca/armv8-mca-draft.pdf](https://www.cl.cam.ac.uk/~pes20/armv8-mca/armv8-mca-draft.pdf)  
+24. What happens with the store "that lost race" to shared memory in x86 TSO memory model?, accessed March 16, 2026, [https://stackoverflow.com/questions/78709202/what-happens-with-the-store-that-lost-race-to-shared-memory-in-x86-tso-memory](https://stackoverflow.com/questions/78709202/what-happens-with-the-store-that-lost-race-to-shared-memory-in-x86-tso-memory)  
+25. ARMv8.3 meaning of rcpc \- Stack Overflow, accessed March 16, 2026, [https://stackoverflow.com/questions/68676666/armv8-3-meaning-of-rcpc](https://stackoverflow.com/questions/68676666/armv8-3-meaning-of-rcpc)  
+26. Sequential Consistency in Armv8 \- Arm Developer, accessed March 16, 2026, [https://developer.arm.com/community/arm-community-blogs/b/tools-software-ides-blog/posts/armv8-sequential-consistency](https://developer.arm.com/community/arm-community-blogs/b/tools-software-ides-blog/posts/armv8-sequential-consistency)  
+27. Formalising the Armv8 memory consistency model \- Linux Kernel, accessed March 16, 2026, [https://www.kernel.org/pub//linux/kernel/people/will/slides/mm-openshmem-2018.pdf](https://www.kernel.org/pub//linux/kernel/people/will/slides/mm-openshmem-2018.pdf)  
+28. Learn the architecture \- Memory Systems, Ordering, and Barriers \- Arm Developer, accessed March 16, 2026, [https://developer.arm.com/documentation/102336/latest/Load-Acquire-and-Store-Release-instructions](https://developer.arm.com/documentation/102336/latest/Load-Acquire-and-Store-Release-instructions)  
+29. 2.3: Acquire and Release semantics \- Armv8-M Barriers and Synchronization User Guide, accessed March 16, 2026, [https://developer.arm.com/documentation/111493/latest/2--Synchronization/2-3--Acquire-and-Release-semantics](https://developer.arm.com/documentation/111493/latest/2--Synchronization/2-3--Acquire-and-Release-semantics)  
+30. The RISC-V Instruction Set Manual, Volume II: Privileged Architecture \- GitHub Pages, accessed March 16, 2026, [https://riscv.github.io/riscv-isa-manual/snapshot/privileged/](https://riscv.github.io/riscv-isa-manual/snapshot/privileged/)  
+31. RISC-V Memory Consistency Model Tutorial, accessed March 16, 2026, [https://riscv.org/wp-content/uploads/2024/12/14.25-15.00-RISCVMemoryModelTutorial.pdf](https://riscv.org/wp-content/uploads/2024/12/14.25-15.00-RISCVMemoryModelTutorial.pdf)  
+32. RVWMO Explanatory Material, Version 0.1 \- RISC-V, accessed March 16, 2026, [https://docs.riscv.org/reference/isa/unpriv/mm-eplan.html](https://docs.riscv.org/reference/isa/unpriv/mm-eplan.html)  
+33. 17.1. RVWMO Memory Consistency Model, Version 2.0 \- riscv.org, accessed March 16, 2026, [https://docs.riscv.org/reference/isa/unpriv/rvwmo.html](https://docs.riscv.org/reference/isa/unpriv/rvwmo.html)  
+34. RISC-V Weak Memory Ordering \- Daniel Mangum, accessed March 16, 2026, [https://danielmangum.com/risc-v-tips/2022-01-05-rvwmo/](https://danielmangum.com/risc-v-tips/2022-01-05-rvwmo/)  
+35. The RISC-V Instruction Set Manual, accessed March 16, 2026, [https://courses.cs.washington.edu/courses/cse481a/20sp/readings/riscv-base.pdf](https://courses.cs.washington.edu/courses/cse481a/20sp/readings/riscv-base.pdf)  
+36. 1\. RVWMO Memory Consistency Model, Version 2.0 \- RISC-V Instruction Set Manual, Volume I: RISC-V User-Level ISA | Five EmbedDev, accessed March 16, 2026, [https://www.five-embeddev.com/riscv-user-isa-manual/latest-adoc/rvwmo](https://www.five-embeddev.com/riscv-user-isa-manual/latest-adoc/rvwmo)  
+37. RVWMO Explanatory Material, Version 0.1 \- RISC-V Instruction Set Manual, Volume I: RISC-V User-Level ISA | Five EmbedDev, accessed March 16, 2026, [https://five-embeddev.com/riscv-user-isa-manual/latest-latex/memory.html](https://five-embeddev.com/riscv-user-isa-manual/latest-latex/memory.html)  
+38. RISC-V Memory Consistency Model Draft \- Google Groups, accessed March 16, 2026, [https://groups.google.com/a/groups.riscv.org/g/isa-dev/c/hKywNHBkAXM/m/QzUtxEWLBQAJ](https://groups.google.com/a/groups.riscv.org/g/isa-dev/c/hKywNHBkAXM/m/QzUtxEWLBQAJ)  
+39. A Formal Analysis of the NVIDIA PTX Memory Consistency Model. | Research, accessed March 16, 2026, [https://research.nvidia.com/publication/2019-04\_formal-analysis-nvidia-ptx-memory-consistency-model](https://research.nvidia.com/publication/2019-04_formal-analysis-nvidia-ptx-memory-consistency-model)  
+40. 1\. Introduction — PTX ISA 9.2 documentation, accessed March 16, 2026, [https://docs.nvidia.com/cuda/parallel-thread-execution/](https://docs.nvidia.com/cuda/parallel-thread-execution/)  
+41. 1\. Introduction — PTX ISA 9.2 documentation, accessed March 16, 2026, [https://docs.nvidia.com/cuda/parallel-thread-execution/index.html\#memory-consistency-model](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#memory-consistency-model)  
+42. A FORMAL ANALYSIS OF THE NVIDIA PTX MEMORY CONSISTENCY MODEL, accessed March 16, 2026, [https://pages.cs.wisc.edu/\~markhill/restricted/asplos19\_nvidia\_consistency\_talk.pdf](https://pages.cs.wisc.edu/~markhill/restricted/asplos19_nvidia_consistency_talk.pdf)  
+43. PTX ISA :: CUDA Toolkit Documentation, accessed March 16, 2026, [https://docs.nvidia.com/cuda/archive/10.0/parallel-thread-execution/index.html](https://docs.nvidia.com/cuda/archive/10.0/parallel-thread-execution/index.html)  
+44. Understanding the CTA-local Requirements of fence.proxy.async, as documented by "Mixed-proxy extensions for the NVIDIA PTX memory consistency model" \- CUDA Programming and Performance, accessed March 16, 2026, [https://forums.developer.nvidia.com/t/understanding-the-cta-local-requirements-of-fence-proxy-async-as-documented-by-mixed-proxy-extensions-for-the-nvidia-ptx-memory-consistency-model/358263](https://forums.developer.nvidia.com/t/understanding-the-cta-local-requirements-of-fence-proxy-async-as-documented-by-mixed-proxy-extensions-for-the-nvidia-ptx-memory-consistency-model/358263)  
+45. Mixed-Proxy Extensions for the NVIDIA PTX Memory Consistency Model Industrial Product \- Cloudfront.net, accessed March 16, 2026, [https://d1qx31qr3h6wln.cloudfront.net/publications/ISCA\_2022\_MixedProxy.pdf](https://d1qx31qr3h6wln.cloudfront.net/publications/ISCA_2022_MixedProxy.pdf)  
+46. Mixed-proxy extensions for the NVIDIA PTX memory consistency model: industrial product, accessed March 16, 2026, [https://www.semanticscholar.org/paper/91ccb6da20dfb56343e614cdac9ec60c0e645a1f](https://www.semanticscholar.org/paper/91ccb6da20dfb56343e614cdac9ec60c0e645a1f)  
+47. Litmus Tests for Comparing Memory Consistency Models: How Long Do They Need to Be? \- University of Pennsylvania, accessed March 16, 2026, [https://repository.upenn.edu/bitstreams/d1985376-fdf9-4137-8e7f-6f8c655f6315/download](https://repository.upenn.edu/bitstreams/d1985376-fdf9-4137-8e7f-6f8c655f6315/download)  
+48. Simulating memory models with herd7 \- diy, accessed March 16, 2026, [https://diy.inria.fr/doc/herd.html](https://diy.inria.fr/doc/herd.html)  
+49. JSONSchemaBench: A Rigorous Benchmark of Structured Outputs for Language Models, accessed March 16, 2026, [https://arxiv.org/html/2501.10868v3](https://arxiv.org/html/2501.10868v3)  
+50. GitHub \- herd/herdtools7: The Herd toolsuite to deal with .cat memory models (version 7.xx), accessed March 16, 2026, [https://github.com/herd/herdtools7](https://github.com/herd/herdtools7)  
+51. Automatically Comparing Memory Consistency Models \- John Wickerson, accessed March 16, 2026, [https://johnwickerson.github.io/memalloy/](https://johnwickerson.github.io/memalloy/)  
+52. Logical time in visualizations produced by parallel programs \- IEEE Xplore, accessed March 16, 2026, [https://ieeexplore.ieee.org/iel2/423/6054/00235209.pdf](https://ieeexplore.ieee.org/iel2/423/6054/00235209.pdf)  
+53. Visualization of Concurrent Program Executions, accessed March 16, 2026, [https://www.nii.ac.jp/TechReports/public\_html/07-006E.pdf](https://www.nii.ac.jp/TechReports/public_html/07-006E.pdf)  
+54. Animated Visualization of Causal Relations Through Growing 2D Geometry∗ \- Page has been moved, accessed March 16, 2026, [https://www.cse.chalmers.se/\~tsigas/papers/causality-Visualizatio-IV.pdf](https://www.cse.chalmers.se/~tsigas/papers/causality-Visualizatio-IV.pdf)  
+55. Visualizing Distributed System Executions, accessed March 16, 2026, [https://homes.cs.washington.edu/\~mernst/pubs/visualize-distributed-tosem2020.pdf](https://homes.cs.washington.edu/~mernst/pubs/visualize-distributed-tosem2020.pdf)  
+56. 9 Visualizing Distributed System Executions \- Manning College of Information & Computer Sciences, accessed March 16, 2026, [https://people.cs.umass.edu/\~brun/pubs/pubs/Beschastnikh20tosem.pdf](https://people.cs.umass.edu/~brun/pubs/pubs/Beschastnikh20tosem.pdf)  
+57. Overview \- React Flow, accessed March 16, 2026, [https://reactflow.dev/learn/layouting/layouting](https://reactflow.dev/learn/layouting/layouting)  
+58. D3 by Observable | The JavaScript library for bespoke data visualization, accessed March 16, 2026, [https://d3js.org/](https://d3js.org/)  
+59. d3-timer | D3 by Observable \- D3.js, accessed March 16, 2026, [https://d3js.org/d3-timer](https://d3js.org/d3-timer)  
+60. React Flow: Node-Based UIs in React, accessed March 16, 2026, [https://reactflow.dev/](https://reactflow.dev/)  
+61. Examples \- React Flow, accessed March 16, 2026, [https://reactflow.dev/examples](https://reactflow.dev/examples)  
+62. Diverse Visualization Techniques and Methods of Moving-Object-Trajectory Data: A Review, accessed March 16, 2026, [https://www.mdpi.com/2220-9964/8/2/63](https://www.mdpi.com/2220-9964/8/2/63)  
+63. Visualizing Large-scale Parallel Communication Traces Using a Particle Animation Technique, accessed March 16, 2026, [http://vis.cs.ucdavis.edu/papers/EuroVis2013\_Sigovan.pdf](http://vis.cs.ucdavis.edu/papers/EuroVis2013_Sigovan.pdf)  
+64. Animated Transition between Node-Link and Parallel Coordinates Visualizations \- arXiv, accessed March 16, 2026, [https://arxiv.org/html/2507.16563v1](https://arxiv.org/html/2507.16563v1)  
+65. Five ways to effectively use animation in data visualization \- Observable, accessed March 16, 2026, [https://observablehq.com/blog/effective-animation](https://observablehq.com/blog/effective-animation)  
+66. On D3, React, and a little bit of Flux | by Shirley Wu \- Medium, accessed March 16, 2026, [https://medium.com/@sxywu/on-d3-react-and-a-little-bit-of-flux-88a226f328f3](https://medium.com/@sxywu/on-d3-react-and-a-little-bit-of-flux-88a226f328f3)  
+67. Modular JSON Schema combination, accessed March 16, 2026, [https://json-schema.org/understanding-json-schema/structuring](https://json-schema.org/understanding-json-schema/structuring)
+
+[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA8AAAAXCAYAAADUUxW8AAAA0klEQVR4XmNgGNZAEIgr0QWJBdOA+A8QM6FLEAIGQPwXiP8DsSiaHEGwH4jvMEA0a6PJ4QWRQDwRiGcxQDQ7okrjBtxAfA6IBYC4hQGiORxFBR7QCsTJUHYBA0RzHkIaN1AG4kNAzAjlxzJANINcQBBsAGIzJL4XA0QzyO84ARsQnwFiCTRxGQaI5hNo4igAlIpK0AWBgIMBovk+ugQIgFJOMBB/AWJeNDkQYAXi71CMksosgfg1VOIXEL8CYj4keVDSfAOV/8EAUduGJD8KBj8AAGTSJtpF0+ZhAAAAAElFTkSuQmCC>
+
+[image2]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAYCAYAAADzoH0MAAABB0lEQVR4Xu2SPy9DYRSHfxWLmJSEpVMnMTQM4mMYhKlmpFNnn0MiJjGQMFotvgFDB4k/XZCI1ICpDc/JeW9bp73dJX2SZzm/3z25976vNCayivf4gq/4jE/4gE28wRpOp34uJ/iDlTDfSPOrMB/gTv4Gw7iVL1mMQcaCvHAWA5jED+zgXMi6bMoX7MQA9uVZPQb9HMhLaziDs7iCR9jA7V51OFZqyX/kcfICH3EdJ3rVQeaV//3L8uw0Bv1syUu7MUjY27WxFIOMQ/mCpRgk7Ggtz11g5/+GhRhAVf7wZQwyyvLCeZhP4R5+4zUW/8Z+RHbXP+ULvuT33mbmu/zq2pKRJzDm3/ILy107yeB3aPYAAAAASUVORK5CYII=>
+
+[image3]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACEAAAAYCAYAAAB0kZQKAAAB3klEQVR4Xu2VzUtUURjGH8t2SaVELlyFCkItxIVLIUIX4qKEwMSVJIiLFoo7V4K4UiwIciNGkQUtAiMK/AeEBJEI+vQjMxIpEBQhy+ed55y8vvPBgKvg/uDHwDzvOffOmWfuACkphblCP9Fl+iW8vqctIZ+jH+mHhHdDFjlF39J1+p1u0BX6GdrP9h+lVWE+L8/pX3rVB+QGlE1BF8xHNzR3271/GbrBX7TMZUewT7BNS31AxqDN233gmITm6nxA7kBZrw8itdDASx8E3tA/tMIHjnfQV5GLWega13wQuQUNDPqAnKX7dNEHjgvQHjM+gHq3R58h90lneARt0AmdSg2tDsbveeLfdG5ibwboOVpOL9IhqKDDKNwnfKU79FXC10HrSsFjDNyD5p7SB3SaPoT27qenD0ezsU9ti1/4IHDcPpyBfq5m3pPoQf4+2AbF9KES2uOJDwLxlG76IPIYGmj0AWlDcX3ogOb6fBCwslre5YNIoefDOLT4ug8c8flwyQdQ0a1vq1Bhs6iHFlsRPSegR7Hl512W5CT0uP9BSxLv2/pm6OLWh4ZElqEJ+j/4Cd2lnYQNtkKL5+m3kO1ChbufWXmIndwS3YJu9Dddg36O5iZdoCNQt1JSUv4fDgDiW32wGSMiyAAAAABJRU5ErkJggg==>
