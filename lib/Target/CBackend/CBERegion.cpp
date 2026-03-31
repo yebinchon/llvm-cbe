@@ -59,6 +59,33 @@ static bool reachesLoopExitFrom(BasicBlock *start, BasicBlock *loopExit,
   return false;
 }
 
+static bool reachesInLoopFrom(BasicBlock *start, BasicBlock *target,
+                              Loop *loop) {
+  if (!start || !target || !loop)
+    return false;
+  if (start == target)
+    return true;
+
+  SmallVector<BasicBlock *, 16> worklist;
+  SmallPtrSet<BasicBlock *, 32> visited;
+  worklist.push_back(start);
+  while (!worklist.empty()) {
+    BasicBlock *curr = worklist.pop_back_val();
+    if (curr == target)
+      return true;
+    if (!visited.insert(curr).second)
+      continue;
+
+    for (BasicBlock *succ : successors(curr)) {
+      if (succ == target)
+        return true;
+      if (loop->contains(succ))
+        worklist.push_back(succ);
+    }
+  }
+  return false;
+}
+
 static bool collectCondInputsInBlock(Value *Root, BasicBlock *BB,
                                      SmallPtrSetImpl<Instruction *> &CondInsts) {
   SmallVector<Value *, 16> worklist;
@@ -607,53 +634,112 @@ bool IfElseRegion::tryBuildCompoundPredicate() {
   if (!parentCond)
     return false;
 
-  // Pattern A: Parent true-arm starts with a condition-only block that shares
+  // Pattern A: Parent true-arm starts with a condition-only chain that shares
   // the parent's false-tail. This is a short-circuit && pattern.
-  Value *childCond = nullptr;
-  if (isConditionOnlyBranchBlock(trueStartBB, childCond)) {
-    auto *childBr = cast<BranchInst>(trueStartBB->getTerminator());
-    bool childTrueToParentFalse = (childBr->getSuccessor(0) == falseStartBB);
-    bool childFalseToParentFalse = (childBr->getSuccessor(1) == falseStartBB);
-    if (childTrueToParentFalse || childFalseToParentFalse) {
+  {
+    std::unique_ptr<CompoundPredicate> andTail;
+    BasicBlock *cursor = trueStartBB;
+    SmallPtrSet<BasicBlock *, 8> visited;
+    bool matchedAny = false;
+    bool firstChildThenIsCombinedThen = true;
+    unsigned chainLen = 0;
+
+    while (cursor && visited.insert(cursor).second) {
+      Value *childCond = nullptr;
+      if (!isConditionOnlyBranchBlock(cursor, childCond))
+        break;
+      auto *childBr = dyn_cast<BranchInst>(cursor->getTerminator());
+      if (!childBr || !childBr->isConditional())
+        break;
+
+      bool childTrueToParentFalse = (childBr->getSuccessor(0) == falseStartBB);
+      bool childFalseToParentFalse = (childBr->getSuccessor(1) == falseStartBB);
+      if (!childTrueToParentFalse && !childFalseToParentFalse)
+        break;
+
       bool negateChild = childTrueToParentFalse;
-      bool childThenIsCombinedThen = childFalseToParentFalse;
+      auto leaf = makeLeafPredicate(childCond, negateChild);
+      andTail = andTail
+                    ? makeBinaryPredicate(CompoundPredicateOp::And,
+                                          std::move(andTail), std::move(leaf))
+                    : std::move(leaf);
+
+      if (!matchedAny)
+        firstChildThenIsCombinedThen = childFalseToParentFalse;
+
+      matchedAny = true;
+      ++chainLen;
+
+      // Continue through the non-shared successor to absorb deeper && links.
+      cursor = childTrueToParentFalse ? childBr->getSuccessor(1)
+                                      : childBr->getSuccessor(0);
+    }
+
+    if (matchedAny) {
       compoundPredicate = makeBinaryPredicate(
           CompoundPredicateOp::And, makeLeafPredicate(parentCond, false),
-          makeLeafPredicate(childCond, negateChild));
-      // The child condition has been absorbed into the parent condition.
+          std::move(andTail));
+      // The first child condition has been absorbed into the parent condition.
       // When printing the parent true branch, print only the selected child
       // branch body to avoid a redundant nested check.
       flattenThenFromChild = true;
       flattenThenChildEntryBB = trueStartBB;
-      flattenThenUsesChildThenBranch = childThenIsCombinedThen;
+      flattenThenUsesChildThenBranch = firstChildThenIsCombinedThen;
       errs() << "CBERegion_DEBUG: collapsed short-circuit && at "
              << brBB->getParent()->getName() << "::" << brBB->getName()
              << " child=" << trueStartBB->getName()
              << " sharedFalseTail=" << falseStartBB->getName()
-             << " negateChild=" << negateChild
+             << " chainLen=" << chainLen
              << " flattenThenUsesChildThenBranch="
              << flattenThenUsesChildThenBranch << "\n";
       return true;
     }
   }
 
-  // Pattern B: Parent false-arm starts with a condition-only block that shares
+  // Pattern B: Parent false-arm starts with a condition-only chain that shares
   // the parent's true-tail. This is a short-circuit || pattern.
-  childCond = nullptr;
-  if (isConditionOnlyBranchBlock(falseStartBB, childCond)) {
-    auto *childBr = cast<BranchInst>(falseStartBB->getTerminator());
-    bool childTrueToParentTrue = (childBr->getSuccessor(0) == trueStartBB);
-    bool childFalseToParentTrue = (childBr->getSuccessor(1) == trueStartBB);
-    if (childTrueToParentTrue || childFalseToParentTrue) {
+  {
+    std::unique_ptr<CompoundPredicate> orTail;
+    BasicBlock *cursor = falseStartBB;
+    SmallPtrSet<BasicBlock *, 8> visited;
+    bool matchedAny = false;
+    unsigned chainLen = 0;
+
+    while (cursor && visited.insert(cursor).second) {
+      Value *childCond = nullptr;
+      if (!isConditionOnlyBranchBlock(cursor, childCond))
+        break;
+      auto *childBr = dyn_cast<BranchInst>(cursor->getTerminator());
+      if (!childBr || !childBr->isConditional())
+        break;
+
+      bool childTrueToParentTrue = (childBr->getSuccessor(0) == trueStartBB);
+      bool childFalseToParentTrue = (childBr->getSuccessor(1) == trueStartBB);
+      if (!childTrueToParentTrue && !childFalseToParentTrue)
+        break;
+
       bool negateChild = childFalseToParentTrue;
+      auto leaf = makeLeafPredicate(childCond, negateChild);
+      orTail = orTail ? makeBinaryPredicate(CompoundPredicateOp::Or,
+                                            std::move(orTail), std::move(leaf))
+                      : std::move(leaf);
+      matchedAny = true;
+      ++chainLen;
+
+      // Continue through the non-shared successor to absorb deeper || links.
+      cursor = childTrueToParentTrue ? childBr->getSuccessor(1)
+                                     : childBr->getSuccessor(0);
+    }
+
+    if (matchedAny) {
       compoundPredicate = makeBinaryPredicate(
           CompoundPredicateOp::Or, makeLeafPredicate(parentCond, false),
-          makeLeafPredicate(childCond, negateChild));
+          std::move(orTail));
       errs() << "CBERegion_DEBUG: collapsed short-circuit || at "
              << brBB->getParent()->getName() << "::" << brBB->getName()
              << " child=" << falseStartBB->getName()
              << " sharedTrueTail=" << trueStartBB->getName()
-             << " negateChild=" << negateChild << "\n";
+             << " chainLen=" << chainLen << "\n";
       return true;
     }
   }
@@ -924,6 +1010,90 @@ void LinearRegion::printRegionDAG() {
     errs() << "SUSAN: printing bb:" << BB->getName() << "\n";
     cw->printBasicBlock(BB);
   }
+}
+
+static void emitHeaderPhiEntryInitializers(CWriter *cw, Loop *loop,
+                                           BasicBlock *header) {
+  for (auto &I : *header) {
+    auto *phi = dyn_cast<PHINode>(&I);
+    if (!phi)
+      break;
+    for (unsigned IncomingIdx = 0; IncomingIdx < phi->getNumIncomingValues();
+         ++IncomingIdx) {
+      BasicBlock *IncomingBB = phi->getIncomingBlock(IncomingIdx);
+      if (loop->contains(IncomingBB))
+        continue;
+      Value *InitVal = phi->getIncomingValue(IncomingIdx);
+      cw->Out << "  " << cw->GetValueName(phi) << " = ";
+      if (auto *CI = dyn_cast<ConstantInt>(InitVal))
+        cw->Out << CI->getSExtValue();
+      else
+        cw->writeOperandInternal(InitVal);
+      cw->Out << ";\n";
+      break;
+    }
+  }
+}
+
+static bool isLoopPhiRecurrence(CWriter *cw, PHINode *phi, Value *incomingVal) {
+  auto *incomingInst = dyn_cast<Instruction>(incomingVal);
+  if (!incomingInst)
+    return false;
+  (void)phi;
+  return cw->isIVIncrement(incomingInst);
+}
+
+static Value *stripSingleIncomingLoopPhis(Value *V, Loop *loop) {
+  while (auto *Phi = dyn_cast<PHINode>(V)) {
+    if (Phi->getNumIncomingValues() != 1)
+      break;
+    BasicBlock *IncomingBB = Phi->getIncomingBlock(0);
+    if (!loop->contains(IncomingBB))
+      break;
+    Value *IncomingVal = Phi->getIncomingValue(0);
+    if (IncomingVal == V)
+      break;
+    V = IncomingVal;
+  }
+  return V;
+}
+
+static PHINode *findHeaderPhiCarryingValue(BasicBlock *header, Loop *loop,
+                                           Value *V) {
+  for (auto &I : *header) {
+    auto *Phi = dyn_cast<PHINode>(&I);
+    if (!Phi)
+      break;
+    for (unsigned IncomingIdx = 0; IncomingIdx < Phi->getNumIncomingValues();
+         ++IncomingIdx) {
+      BasicBlock *IncomingBB = Phi->getIncomingBlock(IncomingIdx);
+      if (!loop->contains(IncomingBB))
+        continue;
+      if (stripSingleIncomingLoopPhis(Phi->getIncomingValue(IncomingIdx), loop) ==
+          V)
+        return Phi;
+    }
+  }
+  return nullptr;
+}
+
+static bool isLoopCarriedHeaderPhiIncoming(Loop *loop, BasicBlock *header,
+                                           Instruction *Inst) {
+  if (!Inst)
+    return false;
+  for (auto &HeaderI : *header) {
+    auto *Phi = dyn_cast<PHINode>(&HeaderI);
+    if (!Phi)
+      break;
+    for (unsigned IncomingIdx = 0; IncomingIdx < Phi->getNumIncomingValues();
+         ++IncomingIdx) {
+      BasicBlock *IncomingBB = Phi->getIncomingBlock(IncomingIdx);
+      if (loop->contains(IncomingBB) &&
+          Phi->getIncomingValue(IncomingIdx) == Inst)
+        return true;
+    }
+  }
+  return false;
 }
 
 void IfElseRegion::printRegionDAG() {
@@ -1219,13 +1389,17 @@ void LoopRegion::printRegionDAG() {
   //   }
   // }
 
+  errs() << "CBackend: LoopRegion seeding header PHIs loop_header="
+         << header->getName() << "\n";
+  cw->emitLoopPHIInitializers(loop, /*skipMainIV=*/true);
+
   // Initialize non-IV PHIs from the preheader before entering the loop.
   for (auto &I : *header) {
     if (PHINode *phi = dyn_cast<PHINode>(&I)) {
       if (phi == IV)
         continue;
       if (cw->isExtraIVEquivalentToMainIV(phi)) {
-        errs() << "ANDREW: Skipping preheader init for equivalent extra IV: "
+        errs() << "ANDREW: Skipping preheader init for another extra IV: "
                << *phi << "\n";
         continue;
       }
@@ -1348,7 +1522,9 @@ void LoopRegion::printRegionDAG() {
   //   after the loop (e.g. use-after-loop of k in sparse()).
   std::string ivName = cw->GetValueName(IV);
   std::string lbName = cw->GetValueName(lb);
+  std::string lbRawName = cw->GetValueName(lb, true);
   bool lbIsInstruction = isa<Instruction>(lb);
+  bool selfInitByName = (lb != IV && ivName == lbName);
   bool ivUsedOutsideLoop = false;
   for (User *U : IV->users()) {
     if (Instruction *UI = dyn_cast<Instruction>(U))
@@ -1367,10 +1543,24 @@ void LoopRegion::printRegionDAG() {
     cw->Out << " ";
   }
   cw->Out << cw->GetValueName(IV, true) << " = ";
-  if (Instruction *lbInst = dyn_cast<Instruction>(lb))
+  if (selfInitByName) {
+    // Avoid emitting self-initializing headers like "for (n = n; ...)" when
+    // naming/coalescing collapses IV and LB symbols.
+    if (!lbRawName.empty() && lbRawName != ivName) {
+      cw->Out << lbRawName;
+    } else if (Instruction *lbInst = dyn_cast<Instruction>(lb)) {
+      // For instruction lower-bounds, prefer the expression over coalesced name
+      // fallback so we don't emit headers like: for (k = k; ...).
+      cw->writeInstComputationInline(*lbInst);
+    } else {
+      // writeOperandInternal bypasses replacement/coalescing maps.
+      cw->writeOperandInternal(lb);
+    }
+  } else if (Instruction *lbInst = dyn_cast<Instruction>(lb)) {
     cw->writeInstComputationInline(*lbInst);
-  else
+  } else {
     cw->writeOperand(lb);
+  }
   cw->Out << "; ";
 
   // exit condition
@@ -1584,10 +1774,28 @@ void LoopRegion::printDoWhileLoop() {
   std::set<Value *> condRelatedInsts;
   BasicBlock *condBlock = condInst->getParent();
   cw->findCondRelatedInsts(condBlock, condRelatedInsts);
+  auto isLoopCarriedHeaderPhiIncoming = [&](Instruction *Inst) -> bool {
+    if (!Inst)
+      return false;
+    for (auto &HeaderI : *header) {
+      auto *Phi = dyn_cast<PHINode>(&HeaderI);
+      if (!Phi)
+        break;
+      for (unsigned IncomingIdx = 0; IncomingIdx < Phi->getNumIncomingValues();
+           ++IncomingIdx) {
+        BasicBlock *IncomingBB = Phi->getIncomingBlock(IncomingIdx);
+        if (loop->contains(IncomingBB) &&
+            Phi->getIncomingValue(IncomingIdx) == Inst)
+          return true;
+      }
+    }
+    return false;
+  };
   for (auto condRelatedInst : condRelatedInsts) {
     Instruction *inst = cast<Instruction>(condRelatedInst);
     if (isa<PHINode>(inst) || isa<BranchInst>(inst) || isa<CmpInst>(inst) ||
-        cw->isInlinableInst(*inst)) {
+        cw->isInlinableInst(*inst) || cw->isIVIncrement(inst) ||
+        isLoopCarriedHeaderPhiIncoming(inst)) {
       errs() << "YEBIN: not printing condrelatedinst:" << *inst << "\n";
       continue;
     }
@@ -1595,6 +1803,7 @@ void LoopRegion::printDoWhileLoop() {
     cw->printInstruction(inst);
   }
 
+  emitHeaderPhiEntryInitializers(cw, loop, header);
   cw->Out << "do {\n";
   // print things in header; this is not in another region
   cw->printBasicBlock(loop->getHeader());
@@ -1635,6 +1844,7 @@ void LoopRegion::printDoWhileLoop() {
             }
           }
           if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            bool isRecurrence = isLoopPhiRecurrence(cw, phi, incomingVal);
             Value *op0 = binOp->getOperand(0);
             Value *op1 = binOp->getOperand(1);
             bool op0IsPhi = (op0 == phi);
@@ -1652,9 +1862,20 @@ void LoopRegion::printDoWhileLoop() {
                 ((binOp->getOpcode() == Instruction::Sub ||
                   binOp->getOpcode() == Instruction::FSub) &&
                  (op0IsPhi && op1IsOne));
-            if (!isSimpleStep) {
-              errs() << "ANDREW: Skipping duplicate do-while reduction PHI update: " << *phi
-                     << " = " << *incomingVal << "\n";
+            if (!isSimpleStep && !isRecurrence) {
+              std::string incomingName = cw->GetValueName(incomingVal);
+              if (incomingName != phiName) {
+                // Keep carry propagation in do-while loops when the recurrence
+                // value is computed into a separate temporary.
+                cw->Out << "  " << phiName << " = ";
+                cw->writeOperandInternal(incomingVal);
+                cw->Out << ";\n";
+                errs() << "ANDREW: Emitting carry-only do-while PHI update: "
+                       << *phi << " = " << *incomingVal << "\n";
+              } else {
+                errs() << "ANDREW: Skipping duplicate do-while reduction PHI update: "
+                       << *phi << " = " << *incomingVal << "\n";
+              }
               break;
             }
           }
@@ -1717,8 +1938,37 @@ void LoopRegion::printDoWhileLoop() {
 
   cw->Out << "} while(";
 
-  // Helper lambda to write operand, checking if it should be replaced by a PHI name
+  // Helper lambda to write operand, checking if it should be replaced by a PHI
+  // name. This also handles cast-wrapped loop-carried PHI incoming values
+  // (e.g. trunc(indvar.next)) so do-while conditions use the already-updated PHI
+  // state instead of reapplying the increment expression.
   auto writeOperandOrPHI = [&](Value *op, ICmpInst *icmp = nullptr) {
+    auto findLoopCarriedPhiForOperand =
+        [&](Value *origOp) -> std::pair<PHINode *, bool> {
+      for (auto &I : *header) {
+        auto *phi = dyn_cast<PHINode>(&I);
+        if (!phi)
+          break;
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+          BasicBlock *incomingBB = phi->getIncomingBlock(i);
+          if (!loop->contains(incomingBB))
+            continue;
+          Value *incomingVal = phi->getIncomingValue(i);
+          if (incomingVal == origOp)
+            return {phi, false};
+          Value *probe = origOp;
+          bool strippedCast = false;
+          while (auto *castI = dyn_cast<CastInst>(probe)) {
+            probe = castI->getOperand(0);
+            strippedCast = true;
+            if (incomingVal == probe)
+              return {phi, strippedCast};
+          }
+        }
+      }
+      return {nullptr, false};
+    };
+
     bool emitCast = icmp && cw->needsCast(op, *icmp);
     if (emitCast) {
       Type *OpTy = op->getType();
@@ -1728,21 +1978,25 @@ void LoopRegion::printDoWhileLoop() {
       cw->printSimpleType(cw->Out, OpTy, icmp->isSigned());
       cw->Out << ")";
     }
-    // Check if this operand is the incoming value to a PHI node in the header
-    for (auto &I : *header) {
-      if (PHINode *phi = dyn_cast<PHINode>(&I)) {
-        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
-          BasicBlock *incomingBB = phi->getIncomingBlock(i);
-          if (loop->contains(incomingBB) && phi->getIncomingValue(i) == op) {
-            // This operand feeds into a PHI node - use the PHI name instead
-            cw->Out << cw->GetValueName(phi);
-            if (emitCast)
-              cw->Out << ")";
-            return;
-          }
-        }
+
+    auto [carryPhi, matchedViaCastStrip] = findLoopCarriedPhiForOperand(op);
+    if (carryPhi) {
+      // Preserve cast semantics when we matched through cast stripping.
+      if (matchedViaCastStrip) {
+        Type *OpTy = op->getType();
+        if (OpTy->isPointerTy())
+          OpTy = cw->TD->getIntPtrType(op->getContext());
+        cw->Out << "((";
+        cw->printSimpleType(cw->Out, OpTy, icmp ? icmp->isSigned() : false);
+        cw->Out << ")" << cw->GetValueName(carryPhi) << ")";
+      } else {
+        cw->Out << cw->GetValueName(carryPhi);
       }
+      if (emitCast)
+        cw->Out << ")";
+      return;
     }
+
     // Not a PHI incoming value, write normally
     cw->writeOperandInternal(op);
     if (emitCast)
@@ -1795,6 +2049,48 @@ void LoopRegion::printDoWhileLoop() {
   }
 
   cw->Out << ");\n";
+
+  // Materialize simple loop-exit LCSSA carriers after the do-while completes.
+  // Without this, values like %mul.lcssa may remain uninitialized in C and
+  // later uses (e.g. sprnvc(..., mul_lcssa, ...)) can observe garbage.
+  if (BasicBlock *exitBB = loop->getExitBlock()) {
+    for (auto &I : *exitBB) {
+      PHINode *exitPhi = dyn_cast<PHINode>(&I);
+      if (!exitPhi)
+        break;
+      if (exitPhi->getNumIncomingValues() != 1)
+        continue;
+      BasicBlock *incomingBB = exitPhi->getIncomingBlock(0);
+      if (!loop->contains(incomingBB))
+        continue;
+      Value *incomingVal = stripSingleIncomingLoopPhis(
+          exitPhi->getIncomingValue(0), loop);
+      if (incomingVal == exitPhi)
+        continue;
+      errs() << "CBackend: doWhile exit LCSSA candidate phi="
+             << exitPhi->getName() << " incoming_raw="
+             << *exitPhi->getIncomingValue(0) << " stripped=" << *incomingVal
+             << " loop_header=" << header->getName() << "\n";
+      if (!cw->isIVIncrement(incomingVal))
+        if (PHINode *HeaderPhi =
+                findHeaderPhiCarryingValue(header, loop, incomingVal)) {
+          errs() << "CBackend: doWhile exit LCSSA remap phi="
+                 << exitPhi->getName() << " header_phi="
+                 << HeaderPhi->getName()
+                 << " loop_header=" << header->getName() << "\n";
+          incomingVal = HeaderPhi;
+        }
+      std::string phiName = cw->GetValueName(exitPhi);
+      std::string incomingName = cw->GetValueName(incomingVal);
+      if (phiName == incomingName)
+        continue;
+      cw->Out << phiName << " = ";
+      cw->writeOperandInternal(incomingVal);
+      cw->Out << ";\n";
+      errs() << "ANDREW: Emitting do-while exit LCSSA copy: "
+             << *exitPhi << " = " << *incomingVal << "\n";
+    }
+  }
 }
 
 // FIXME: add print for while loop
@@ -1839,9 +2135,13 @@ void LoopRegion::printWhileLoop() {
   
   errs() << *condInst << "\n";
 
-  std::set<Instruction *> printedLiveins;
-  // TODO: move to later?
-  // cond block should be latch
+  // Keep while-loop PHI materialization consistent with do-while/for:
+  // seed header PHIs from non-loop incoming edges before emitting the loop.
+  // Without this, loop-header carries such as
+  //   %indvars.iv94 = phi [ %next, %latch ], [ %init, %entry ]
+  // can be used uninitialized in generated C.
+  emitHeaderPhiEntryInitializers(cw, loop, header);
+
   std::set<Value *> condRelatedInsts;
   if (!condBlock)
     condBlock = condInst->getParent();
@@ -1860,7 +2160,6 @@ void LoopRegion::printWhileLoop() {
   cw->printBasicBlock(loop->getHeader());
 
   cw->Out << "while (";
-  //exit condition
   CmpInst *cmp = dyn_cast<CmpInst>(condInst);
   // not the result of a comparison; single value
   if(!cmp)
@@ -1941,17 +2240,19 @@ void LoopRegion::printWhileLoop() {
                      << " = " << *incomingVal << "\n";
               break;
             }
-            // Emit explicit step update to avoid name-coalescing turning
-            // "x = x + 1" into "x = x" for IV-like carries.
-            cw->Out << "  " << phiName << " = " << phiName;
-            if (binOp->getOpcode() == Instruction::Sub ||
-                binOp->getOpcode() == Instruction::FSub)
-              cw->Out << " - 1;\n";
-            else
-              cw->Out << " + 1;\n";
-            errs() << "ANDREW: Emitting explicit while PHI step: " << phiName
-                   << "\n";
-            break;
+            if (isSimpleStep) {
+              // Emit explicit step update to avoid name-coalescing turning
+              // "x = x + 1" into "x = x" for IV-like carries.
+              cw->Out << "  " << phiName << " = " << phiName;
+              if (binOp->getOpcode() == Instruction::Sub ||
+                  binOp->getOpcode() == Instruction::FSub)
+                cw->Out << " - 1;\n";
+              else
+                cw->Out << " + 1;\n";
+              errs() << "ANDREW: Emitting explicit while PHI step: " << phiName
+                     << "\n";
+              break;
+            }
           }
           // Emit: phi_name = incoming_value;
           // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
@@ -2126,6 +2427,7 @@ void LoopRegion::printWhileLoopWithContinue() {
             }
           }
           if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(incomingVal)) {
+            bool isRecurrence = isLoopPhiRecurrence(cw, phi, incomingVal);
             Value *op0 = binOp->getOperand(0);
             Value *op1 = binOp->getOperand(1);
             bool op0IsPhi = (op0 == phi);
@@ -2143,22 +2445,24 @@ void LoopRegion::printWhileLoopWithContinue() {
                 ((binOp->getOpcode() == Instruction::Sub ||
                   binOp->getOpcode() == Instruction::FSub) &&
                  (op0IsPhi && op1IsOne));
-            if (!isSimpleStep) {
+            if (!isSimpleStep && !isRecurrence) {
               errs() << "ANDREW: Skipping duplicate whileWithContinue reduction PHI update: " << *phi
                      << " = " << *incomingVal << "\n";
               break;
             }
-            // Emit explicit step update to avoid phi-replacement collapse
-            // turning "x = x + 1" into "x = x".
-            cw->Out << "  " << phiName << " = " << phiName;
-            if (binOp->getOpcode() == Instruction::Sub ||
-                binOp->getOpcode() == Instruction::FSub)
-              cw->Out << " - 1;\n";
-            else
-              cw->Out << " + 1;\n";
-            errs() << "ANDREW: Emitting explicit whileWithContinue PHI step: "
-                   << phiName << "\n";
-            break;
+            if (isSimpleStep) {
+              // Emit explicit step update to avoid phi-replacement collapse
+              // turning "x = x + 1" into "x = x".
+              cw->Out << "  " << phiName << " = " << phiName;
+              if (binOp->getOpcode() == Instruction::Sub ||
+                  binOp->getOpcode() == Instruction::FSub)
+                cw->Out << " - 1;\n";
+              else
+                cw->Out << " + 1;\n";
+              errs() << "ANDREW: Emitting explicit whileWithContinue PHI step: "
+                     << phiName << "\n";
+              break;
+            }
           }
           // Emit: phi_name = incoming_value;
           // Use writeOperandInternal to bypass InstsToReplaceByPhi coalescing
@@ -2182,10 +2486,31 @@ void CBERegion2::printRegionDAG() {
 }
 ;
 void IfElseRegion::removeIfElseBlockFromLR(LoopRegion *lr, BasicBlock *brBB) {
-  for (auto &BB : *(brBB->getParent())) {
-    if (DT->dominates(brBB, &BB) && PDT->dominates(pdBB, &BB) && pdBB != &BB) {
-      lr->removeBBToVisit(&BB);
+  if (!lr || !brBB)
+    return;
+
+  // Fast path: traverse only blocks dominated by brBB, instead of scanning the
+  // entire function for every if/else region.
+  if (DT && PDT && pdBB) {
+    if (auto *Root = DT->getNode(brBB)) {
+      SmallVector<DomTreeNode *, 16> worklist;
+      worklist.push_back(Root);
+      while (!worklist.empty()) {
+        DomTreeNode *Node = worklist.pop_back_val();
+        BasicBlock *BB = Node->getBlock();
+        if (BB && BB != pdBB && PDT->dominates(pdBB, BB))
+          lr->removeBBToVisit(BB);
+        for (auto *Child : Node->getChildren())
+          worklist.push_back(Child);
+      }
+      return;
     }
+  }
+
+  // Conservative fallback when dominance info is unavailable.
+  for (auto &BB : *(brBB->getParent())) {
+    if (DT->dominates(brBB, &BB) && PDT->dominates(pdBB, &BB) && pdBB != &BB)
+      lr->removeBBToVisit(&BB);
   }
 }
 
@@ -2271,6 +2596,18 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
           startBB = succ1;
         } else if (succ1 == nextEntryBB) {
           startBB = succ0;
+        } else if (latchBB) {
+          // Prefer the successor that can reach the latch when exit-reachability
+          // is ambiguous. This keeps body selection aligned with loop-carried flow.
+          bool succ0ReachesLatch = reachesInLoopFrom(succ0, latchBB, loop);
+          bool succ1ReachesLatch = reachesInLoopFrom(succ1, latchBB, loop);
+          if (succ0ReachesLatch != succ1ReachesLatch) {
+            startBB = succ0ReachesLatch ? succ0 : succ1;
+          } else {
+            errs() << "ANDREW: ambiguous whileLoopWithContinue body successor at "
+                   << condBlock->getName() << ", defaulting to succ0\n";
+            startBB = succ0;
+          }
         } else {
           errs() << "ANDREW: ambiguous whileLoopWithContinue body successor at "
                  << condBlock->getName() << ", defaulting to succ0\n";
@@ -2283,15 +2620,45 @@ LoopRegion::LoopRegion(BasicBlock *entryBB, LoopInfo *LI,
     }
     case whileLoop:
       errs() << "Found whileLoop " << loop->getName() << "\n";
-      //TODO: deal with while loops
       succ0 = dyn_cast<BranchInst>(entryBB->getTerminator())->getSuccessor(0);
       succ1 = dyn_cast<BranchInst>(entryBB->getTerminator())->getSuccessor(1);
-      if (succ0 == nextEntryBB)
+      if (succ0 == nextEntryBB || !loop->contains(succ0)) {
         startBB = succ1;
-      else if (succ1 == nextEntryBB)
+      } else if (succ1 == nextEntryBB || !loop->contains(succ1)) {
         startBB = succ0;
-      else
-        assert(0 && "exit block is not from header!\n");
+      } else {
+        bool succ0LeadsToExit = reachesLoopExitFrom(succ0, nextEntryBB, loop);
+        bool succ1LeadsToExit = reachesLoopExitFrom(succ1, nextEntryBB, loop);
+        if (succ0LeadsToExit != succ1LeadsToExit) {
+          startBB = succ0LeadsToExit ? succ1 : succ0;
+        } else {
+          bool succ0ReachesSucc1 = reachesInLoopFrom(succ0, succ1, loop);
+          bool succ1ReachesSucc0 = reachesInLoopFrom(succ1, succ0, loop);
+          if (succ0ReachesSucc1 != succ1ReachesSucc0) {
+            startBB = succ0ReachesSucc1 ? succ0 : succ1;
+          } else if (latchBB) {
+            // Prefer the successor that can reach the latch when both successors
+            // remain in-loop and neither directly identifies as exit/body.
+            bool succ0ReachesLatch = reachesInLoopFrom(succ0, latchBB, loop);
+            bool succ1ReachesLatch = reachesInLoopFrom(succ1, latchBB, loop);
+            if (succ0ReachesLatch != succ1ReachesLatch) {
+              startBB = succ0ReachesLatch ? succ0 : succ1;
+            } else {
+              errs() << "ANDREW: whileLoop header does not directly exit at "
+                     << entryBB->getName()
+                     << ", defaulting body successor to " << succ0->getName()
+                     << "\n";
+              startBB = succ0;
+            }
+          } else {
+            errs() << "ANDREW: whileLoop header does not directly exit at "
+                   << entryBB->getName()
+                   << ", defaulting body successor to " << succ0->getName()
+                   << "\n";
+            startBB = succ0;
+          }
+        }
+      }
       errs() << "StartBB: " << startBB->getName() << "\n";    
       break;
     case forLoop:

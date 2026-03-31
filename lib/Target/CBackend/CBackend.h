@@ -115,6 +115,14 @@ class CWriter : public ModulePass, public InstVisitor<CWriter> {
                             enum OperandContext Context = ContextNormal, bool startExpression = true);
   void writeOperandWithCast(Value *Operand, unsigned Opcode, bool startExpression = true);
   void opcodeNeedsCast(unsigned Opcode, bool &shouldCast, bool &castIsSigned);
+  void emitLoopPHIInitializers(Loop *L, bool skipMainIV = true);
+  enum PointerCastUseKind {
+    PointerCastGeneral,
+    PointerCastDirectMemoryOperand
+  };
+  void writePointerCastSource(Value *Operand, PointerCastUseKind UseKind,
+                              enum OperandContext Context = ContextCasted,
+                              bool startExpression = true);
 
   void writeOperandWithCast(Value *Operand, ICmpInst &I);
   Instruction* findCondInst(Loop *L, bool &negateCondition);
@@ -367,6 +375,9 @@ public:
   //virtual bool runOnFunction(Function &F);
   virtual bool runOnModule(Module &M);
   void emitPHIsForPredecessor(BasicBlock *BB);
+  bool isExtraInductionVariableForRegion(Value *V) {
+    return isExtraInductionVariable(V);
+  }
   void emitPHICopiesForSuccessorEdge(BasicBlock *CurBlock,
                                      BasicBlock *Successor,
                                      unsigned Indent) {
@@ -463,7 +474,7 @@ private:
   void printLoopBody(LoopProfile *LP, Instruction *condInst,  std::set<Value*> &skipInsts);
   bool isInductionVariable(Value* V);
   bool isExtraInductionVariable(Value* V);
-  void initializeLoopPHIs(Loop *L);
+  void initializeLoopPHIs(Loop *L, bool skipMainIV = true);
   void printPHIsIfNecessary(BasicBlock* BB);
   void FindLiveInsFor(Loop *L, Value *val);
   void searchForBlocksToSkip(Loop *L, std::set<BasicBlock*> &skipBlocks);
